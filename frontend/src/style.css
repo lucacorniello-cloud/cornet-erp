@@ -128,3 +128,22 @@
 .quality p{margin:3px 0 0;font-size:12px}
 .sampletable{border:1px solid #e7e9ef;border-radius:12px;overflow:auto}
 .previewnote{color:#7c8494;font-size:12px;text-align:center;margin:13px 0 0}
+.customerrow{cursor:pointer;transition:background .15s ease}
+.customerrow:hover{background:#faf9ff}
+.customerdrawer{width:min(860px,100%)}
+.customerfacts{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.customerfacts>div,.assetdata>div{background:#f7f8fb;border-radius:10px;padding:12px;display:grid;gap:4px}
+.customerfacts span,.assetdata span{color:#858d9c;font-size:9px;text-transform:uppercase;letter-spacing:.6px}
+.customerfacts b,.assetdata b{font-size:13px}
+.assetlist{display:grid;gap:11px}
+.assetcard{border:1px solid #e4e7ee;border-radius:14px;padding:15px;background:#fff;box-shadow:0 5px 16px #1f273c08}
+.assethead{display:flex;align-items:center;gap:11px}
+.assethead>div:nth-child(2){min-width:0;flex:1}
+.assethead small{color:#7465e8;font-size:9px;font-weight:800;letter-spacing:.7px}
+.assethead h3{margin:3px 0;font-size:17px}
+.asseticon{width:39px;height:39px;border-radius:11px;display:grid;place-items:center;background:#f0edff;color:#6757e8}
+.asseticon svg{width:19px}
+.assetdata{display:grid;grid-template-columns:1.4fr .6fr .7fr;gap:8px;margin-top:12px}
+.campaignchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+.campaignchips span{background:#f4f2ff;color:#594bc8;border:1px solid #e3defe;border-radius:999px;padding:5px 8px;font-size:10px}
+@media(max-width:650px){.customerfacts,.assetdata{grid-template-columns:1fr}}

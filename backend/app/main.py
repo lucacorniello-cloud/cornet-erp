@@ -418,11 +418,23 @@ def customer_detail(customer_id: uuid.UUID):
         customer = db.get(Customer, customer_id)
         if not customer:
             raise HTTPException(404, "Cliente non trovato")
-        latest_rows = db.scalars(
-            select(WindTreImportRow)
-            .where(WindTreImportRow.customer_id == customer_id)
-            .order_by(WindTreImportRow.row_number)
-        ).all()
+        latest_import = db.scalar(
+            select(WindTreImport)
+            .order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc())
+            .limit(1)
+        )
+        latest_rows = (
+            db.scalars(
+                select(WindTreImportRow)
+                .where(
+                    WindTreImportRow.customer_id == customer_id,
+                    WindTreImportRow.import_id == latest_import.id,
+                )
+                .order_by(WindTreImportRow.row_number)
+            ).all()
+            if latest_import
+            else []
+        )
         return {
             "id": str(customer.id),
             "business_name": customer.business_name,
@@ -433,6 +445,7 @@ def customer_detail(customer_id: uuid.UUID):
             "portfolio_status": customer.portfolio_status,
             "first_seen_month": customer.first_seen_month,
             "last_seen_month": customer.last_seen_month,
+            "snapshot_month": latest_import.competence_month if latest_import else None,
             "assets": [
                 {
                     "asset_key": row.asset_key,

@@ -102,6 +102,7 @@ function Dashboard({openImports}:{openImports:()=>void}){
 
 function Customers(){
   const [items,setItems]=useState<any[]>([]);
+  const [selected,setSelected]=useState<any>(null);
   const [search,setSearch]=useState("");
   const [loading,setLoading]=useState(true);
   useEffect(()=>{
@@ -109,11 +110,37 @@ function Customers(){
     const timer=setTimeout(()=>fetch(API+"/customers?segment=BUSINESS_SME&search="+encodeURIComponent(search)).then(r=>r.json()).then(setItems).finally(()=>setLoading(false)),250);
     return()=>clearTimeout(timer);
   },[search]);
+  async function openCustomer(id:string){
+    const response=await fetch(API+"/customers/"+id);
+    if(response.ok)setSelected(await response.json());
+  }
   return <main className="page">
     <div className="title"><div><small>CRM · BUSINESS SME</small><h1>Portafoglio clienti</h1><p>Clienti consolidati dalle estrazioni mensili WINDTRE.</p></div></div>
     <div className="toolbar"><div className="inputsearch"><Search size={17}/><input placeholder="Ragione sociale, P.IVA, codice cliente..." value={search} onChange={e=>setSearch(e.target.value)}/></div><span>{items.length} clienti</span></div>
-    <article className="tablecard">{loading?<div className="loading">Caricamento…</div>:items.length?<table><thead><tr><th>Cliente</th><th>Codice WINDTRE</th><th>P.IVA / C.F.</th><th>Ultima presenza</th><th>Stato</th></tr></thead><tbody>{items.map(c=><tr key={c.id}><td><b>{c.business_name}</b><small>Business SME</small></td><td>{c.windtre_customer_code||"—"}</td><td>{c.tax_id||c.fiscal_code||"—"}</td><td>{c.last_seen_month?monthLabel(c.last_seen_month):"—"}</td><td><Status value={c.portfolio_status}/></td></tr>)}</tbody></table>:<Empty icon={<Users/>} text="I clienti compariranno dopo la prima importazione"/>}</article>
+    <article className="tablecard">{loading?<div className="loading">Caricamento…</div>:items.length?<table><thead><tr><th>Cliente</th><th>Codice WINDTRE</th><th>P.IVA / C.F.</th><th>Ultima presenza</th><th>Stato</th><th></th></tr></thead><tbody>{items.map(c=><tr key={c.id} className="customerrow" onClick={()=>openCustomer(c.id)}><td><b>{c.business_name}</b><small>Business SME</small></td><td>{c.windtre_customer_code||"—"}</td><td>{c.tax_id||c.fiscal_code||"—"}</td><td>{c.last_seen_month?monthLabel(c.last_seen_month):"—"}</td><td><Status value={c.portfolio_status}/></td><td><button className="linkbtn" onClick={event=>{event.stopPropagation();openCustomer(c.id)}}>Utenze</button></td></tr>)}</tbody></table>:<Empty icon={<Users/>} text="I clienti compariranno dopo la prima importazione"/>}</article>
+    {selected&&<CustomerDetail item={selected} close={()=>setSelected(null)}/>}
   </main>;
+}
+
+function CustomerDetail({item,close}:{item:any;close:()=>void}){
+  const campaigns=Array.from(new Set((item.assets||[]).flatMap((asset:any)=>Object.keys(asset.campaigns||{}))));
+  return <div className="overlay" onMouseDown={event=>{if(event.currentTarget===event.target)close()}}>
+    <section className="drawer customerdrawer"><button className="close" onClick={close}>×</button>
+      <small>CLIENTE BUSINESS SME</small><h2>{item.business_name}</h2>
+      <div className="customerfacts">
+        <div><span>Codice WINDTRE</span><b>{item.windtre_customer_code||"—"}</b></div>
+        <div><span>P.IVA / C.F.</span><b>{item.tax_id||item.fiscal_code||"—"}</b></div>
+        <div><span>Fotografia portafoglio</span><b>{item.snapshot_month?monthLabel(item.snapshot_month):"—"}</b></div>
+      </div>
+      <div className="sectiontitle"><div><FileSpreadsheet/><h2>Utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
+      {item.assets?.length?<div className="assetlist">{item.assets.map((asset:any)=><article className="assetcard" key={asset.asset_key}>
+        <div className="assethead"><div className="asseticon"><BriefcaseBusiness/></div><div><small>{asset.asset_type||"UTENZA WINDTRE"}</small><h3>{asset.asset_number||asset.asset_key}</h3></div><Status value={asset.status==="ACTIVE"?"ACTIVE":item.portfolio_status}/></div>
+        <div className="assetdata"><div><span>Piano / offerta</span><b>{asset.plan||"Non indicato"}</b></div><div><span>Canone</span><b>{asset.monthly_fee?`${asset.monthly_fee} €`:"—"}</b></div><div><span>Stato DB Tool</span><b>{asset.status||"—"}</b></div></div>
+        {Object.keys(asset.campaigns||{}).length>0&&<div className="campaignchips">{Object.entries(asset.campaigns).map(([name,value]:any)=><span key={name}><b>{name}</b> {value}</span>)}</div>}
+      </article>)}</div>:<Empty icon={<FileSpreadsheet/>} text="Nessuna utenza nell’ultima estrazione"/>}
+      {campaigns.length>0&&<p className="previewnote">{campaigns.length} campagne distinte rilevate sulle utenze del cliente.</p>}
+    </section>
+  </div>
 }
 
 function Imports(){

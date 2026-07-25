@@ -256,6 +256,51 @@ def parse_workbook(contents: bytes) -> list[dict[str, Any]]:
     return parsed
 
 
+def validate_excel_upload(filename: str | None, contents: bytes) -> None:
+    if not filename or not filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(422, "Carica un file Excel .xlsx o .xlsm")
+    if len(contents) > 40 * 1024 * 1024:
+        raise HTTPException(413, "Il file supera il limite di 40 MB")
+
+
+def build_preview(filename: str, contents: bytes, parsed: list[dict[str, Any]]) -> dict[str, Any]:
+    customer_keys = {row["customer_key"] for row in parsed}
+    asset_keys = [row["asset_key"] for row in parsed]
+    campaign_names = sorted({name for row in parsed for name in row["campaigns"]})
+    duplicate_assets = len(asset_keys) - len(set(asset_keys))
+    rows_without_tax_id = sum(not (row["tax_id"] or row["fiscal_code"]) for row in parsed)
+    rows_without_customer_code = sum(not row["customer_code"] for row in parsed)
+    return {
+        "file_name": filename,
+        "file_sha256": sha256(contents).hexdigest(),
+        "row_count": len(parsed),
+        "customer_count": len(customer_keys),
+        "asset_count": len(set(asset_keys)),
+        "campaign_count": len(campaign_names),
+        "campaign_names": campaign_names,
+        "quality": {
+            "duplicate_asset_rows": duplicate_assets,
+            "rows_without_tax_id": rows_without_tax_id,
+            "rows_without_customer_code": rows_without_customer_code,
+        },
+        "sample_rows": [
+            {
+                "row_number": row["row_number"],
+                "business_name": row["business_name"],
+                "customer_code": row["customer_code"],
+                "tax_id": row["tax_id"],
+                "asset_type": row["asset_type"],
+                "asset_number": row["asset_number"],
+                "plan": row["plan"],
+                "status": row["status"],
+                "monthly_fee": row["monthly_fee"],
+                "campaigns": row["campaigns"],
+            }
+            for row in parsed[:20]
+        ],
+    }
+
+
 def text(value: Any) -> str | None:
     if value is None:
         return None
@@ -435,15 +480,25 @@ def import_detail(import_id: uuid.UUID):
         return result
 
 
+@app.post("/api/v1/windtre-imports/preview")
+async def preview_windtre_file(file: UploadFile = File(...)):
+    contents = await file.read()
+    validate_excel_upload(file.filename, contents)
+    try:
+        parsed = parse_workbook(contents)
+    except Exception as exc:
+        raise HTTPException(422, f"Impossibile leggere il file Excel: {exc}") from exc
+    if not parsed:
+        raise HTTPException(422, "Il file non contiene righe cliente riconoscibili")
+    return build_preview(file.filename or "estrazione.xlsx", contents, parsed)
+
+
 @app.post("/api/v1/windtre-imports")
 async def import_windtre_file(competence_month: str = Form(...), file: UploadFile = File(...)):
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", competence_month):
         raise HTTPException(422, "Il mese deve essere nel formato AAAA-MM")
-    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(422, "Carica un file Excel .xlsx o .xlsm")
     contents = await file.read()
-    if len(contents) > 40 * 1024 * 1024:
-        raise HTTPException(413, "Il file supera il limite di 40 MB")
+    validate_excel_upload(file.filename, contents)
     digest = sha256(contents).hexdigest()
     try:
         parsed = parse_workbook(contents)

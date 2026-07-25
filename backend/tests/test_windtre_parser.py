@@ -3,7 +3,7 @@ import unittest
 
 from openpyxl import Workbook
 
-from app.main import parse_workbook
+from app.main import build_preview, parse_workbook
 
 
 class WindTreParserTests(unittest.TestCase):
@@ -48,6 +48,20 @@ class WindTreParserTests(unittest.TestCase):
             rows[0]["campaigns"],
             {"V_SMARTPHONE": "Y_PREMIUM", "V_SIM_RINNOVABILI": "Y_11E"},
         )
+
+    def test_builds_preview_with_quality_and_sample(self):
+        contents = self.make_file()
+        rows = parse_workbook(contents)
+        preview = build_preview("portafoglio.xlsx", contents, rows)
+
+        self.assertEqual(preview["file_name"], "portafoglio.xlsx")
+        self.assertEqual(preview["row_count"], 1)
+        self.assertEqual(preview["customer_count"], 1)
+        self.assertEqual(preview["asset_count"], 1)
+        self.assertEqual(preview["campaign_count"], 2)
+        self.assertEqual(preview["quality"]["duplicate_asset_rows"], 0)
+        self.assertEqual(preview["sample_rows"][0]["business_name"], "Rossi SRL")
+        self.assertIn("V_SMARTPHONE", preview["campaign_names"])
 
 
 if __name__ == "__main__":

@@ -314,6 +314,31 @@ class TerminalCatalogMetadata(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class TerminalInventoryItem(Base):
+    __tablename__ = "terminal_inventory_items"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel: Mapped[str] = mapped_column(String(10), index=True)
+    model: Mapped[str] = mapped_column(String(255), index=True)
+    gsi_code: Mapped[str] = mapped_column(String(100), index=True)
+    pieces: Mapped[int] = mapped_column(Integer, default=0)
+    skip_availability: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TerminalInventoryMetadata(Base):
+    __tablename__ = "terminal_inventory_metadata"
+    channel: Mapped[str] = mapped_column(String(10), primary_key=True)
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    sheet_name: Mapped[str | None] = mapped_column(String(255))
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class DdtShipmentSim(Base):
     __tablename__ = "ddt_shipment_sims"
     ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
@@ -1370,6 +1395,13 @@ def letterhead_pdf(data: LetterheadGenerateRequest):
 
 TERMINAL_TYPES = {"SMARTPHONE", "TABLET", "ROUTER", "ACCESSORIO"}
 CUSTOMER_BANDS = {"START", "SMERALDO", "RUBINO", "ZAFFIRO"}
+TERMINAL_INVENTORY_ALIASES = {
+    "model": {"MODELLO", "COD_CL_TM", "CODCLTM"},
+    "gsi": {"CODICE_GSI", "CODICEGSI"},
+    "pieces": {"PEZZI", "QUANTITA", "QTY"},
+    "skip": {"SKIP_DISPONIBILITA", "SKIPDISPONIBILITA", "SKIP"},
+    "notes": {"NOTE", "COMMENTI"},
+}
 GA_ALIASES = {
     "model": {"MODELLO", "MODELLO_TERMINALE", "TERMINALE", "DESCRIZIONE"},
     "gsi": {"CODICE_GSI", "GSI", "COD_GSI", "CODICE"},
@@ -1385,6 +1417,177 @@ GA_ALIASES = {
     "promotion": {"PROMOZIONE", "NOME_PROMOZIONE", "PROMO"},
     "promotion_id": {"ID_PROMOZIONE", "ID_PROMO"},
 }
+
+
+def excel_sheet_rows(contents: bytes, filename: str, sheet_name: str) -> list[list[Any]]:
+    try:
+        if filename.lower().endswith(".xls"):
+            workbook = xlrd.open_workbook(file_contents=contents)
+            if sheet_name not in workbook.sheet_names():
+                raise HTTPException(422, "Foglio Excel non trovato")
+            sheet = workbook.sheet_by_name(sheet_name)
+            return [sheet.row_values(index) for index in range(sheet.nrows)]
+        workbook = load_workbook(BytesIO(contents), read_only=True, data_only=True)
+        if sheet_name not in workbook.sheetnames:
+            raise HTTPException(422, "Foglio Excel non trovato")
+        return [list(row) for row in workbook[sheet_name].iter_rows(values_only=True)]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(422, f"File Excel non leggibile: {exc}")
+
+
+def find_terminal_inventory_header(rows: list[list[Any]]) -> tuple[int, list[str]]:
+    known = {alias for aliases in TERMINAL_INVENTORY_ALIASES.values() for alias in aliases}
+    candidates = []
+    for index, values in enumerate(rows[:25]):
+        headers = [normalize_header(value) for value in values]
+        candidates.append((sum(header in known for header in headers), index, headers))
+    if not candidates:
+        raise HTTPException(422, {"message": "Il foglio è vuoto", "missing_columns": ["Modello", "Codice GSI"], "detected_columns": []})
+    _, index, headers = max(candidates, key=lambda candidate: candidate[0])
+    missing = []
+    if not any(header in TERMINAL_INVENTORY_ALIASES["model"] for header in headers):
+        missing.append("Modello")
+    if not any(header in TERMINAL_INVENTORY_ALIASES["gsi"] for header in headers):
+        missing.append("Codice GSI")
+    if missing:
+        raise HTTPException(422, {
+            "message": "Tracciato Excel non valido",
+            "missing_columns": missing,
+            "detected_columns": [header for header in headers if header],
+        })
+    return index, headers
+
+
+def inventory_integer(value: Any) -> int:
+    text = clean(value).replace(".", "").replace(",", ".")
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def inventory_boolean(value: Any) -> bool:
+    return normalize_header(value) in {"1", "TRUE", "VERO", "SI", "S", "YES", "Y", "X"}
+
+
+def serialize_terminal_inventory(item: TerminalInventoryItem) -> dict[str, Any]:
+    available = item.pieces > 0 or item.skip_availability
+    return {
+        "id": str(item.id),
+        "channel": item.channel,
+        "model": item.model,
+        "gsi_code": item.gsi_code,
+        "pieces": item.pieces,
+        "skip_availability": item.skip_availability,
+        "notes": item.notes or "",
+        "available": available,
+        "availability_label": "Disponibile" if item.pieces > 0 else ("Su ordinazione" if item.skip_availability else "Non disponibile"),
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/v1/terminal-inventory")
+def terminal_inventory(channel: str, search: str = ""):
+    if channel not in {"GA", "CB"}:
+        raise HTTPException(422, "Canale non valido")
+    with SessionLocal() as db:
+        query = select(TerminalInventoryItem).where(TerminalInventoryItem.channel == channel)
+        if search.strip():
+            pattern = f"%{search.strip()}%"
+            query = query.where(or_(
+                TerminalInventoryItem.model.ilike(pattern),
+                TerminalInventoryItem.gsi_code.ilike(pattern),
+                TerminalInventoryItem.notes.ilike(pattern),
+            ))
+        items = db.scalars(query.order_by(TerminalInventoryItem.model, TerminalInventoryItem.gsi_code)).all()
+        meta = db.get(TerminalInventoryMetadata, channel)
+        totals = db.execute(
+            select(func.count(TerminalInventoryItem.id), func.coalesce(func.sum(TerminalInventoryItem.pieces), 0))
+            .where(TerminalInventoryItem.channel == channel)
+        ).one()
+        return {
+            "items": [serialize_terminal_inventory(item) for item in items],
+            "kpi": {"models": totals[0], "pieces": totals[1]},
+            "metadata": {
+                "file_name": meta.file_name,
+                "sheet_name": meta.sheet_name,
+                "row_count": meta.row_count,
+                "updated_at": meta.updated_at.isoformat(),
+            } if meta else None,
+        }
+
+
+@app.post("/api/v1/terminal-inventory/sheets")
+async def terminal_inventory_sheets(file: UploadFile = File(...)):
+    contents = await file.read()
+    filename = file.filename or ""
+    if not filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(422, "Carica un file Excel .xlsx o .xls")
+    try:
+        sheets = xlrd.open_workbook(file_contents=contents).sheet_names() if filename.lower().endswith(".xls") else load_workbook(BytesIO(contents), read_only=True, data_only=True).sheetnames
+    except Exception as exc:
+        raise HTTPException(422, f"File Excel non leggibile: {exc}")
+    return {"sheets": sheets}
+
+
+@app.post("/api/v1/terminal-inventory/import")
+async def import_terminal_inventory(
+    file: UploadFile = File(...),
+    sheet_name: str = Form(...),
+    channel: str = Form(...),
+):
+    if channel not in {"GA", "CB"}:
+        raise HTTPException(422, "Canale non valido")
+    filename = file.filename or ""
+    if not filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(422, "Carica un file Excel .xlsx o .xls")
+    contents = await file.read()
+    sheet_rows = excel_sheet_rows(contents, filename, sheet_name)
+    header_index, headers = find_terminal_inventory_header(sheet_rows)
+    parsed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row_number, values in enumerate(sheet_rows[header_index + 1:], header_index + 2):
+        raw = {headers[index]: value for index, value in enumerate(values) if index < len(headers) and headers[index] and clean(value)}
+        if not raw:
+            continue
+        model = mapped_value(raw, TERMINAL_INVENTORY_ALIASES["model"])
+        gsi = mapped_value(raw, TERMINAL_INVENTORY_ALIASES["gsi"])
+        if not model or not gsi:
+            skipped.append({"row": row_number, "error": "Modello o Codice GSI mancante"})
+            continue
+        parsed.append({
+            "model": model,
+            "gsi_code": gsi,
+            "pieces": inventory_integer(mapped_value(raw, TERMINAL_INVENTORY_ALIASES["pieces"])),
+            "skip_availability": inventory_boolean(mapped_value(raw, TERMINAL_INVENTORY_ALIASES["skip"])),
+            "notes": mapped_value(raw, TERMINAL_INVENTORY_ALIASES["notes"]) or None,
+        })
+    if not parsed:
+        raise HTTPException(422, {
+            "message": "Nessun dato valido: la giacenza precedente non è stata modificata",
+            "missing_columns": [],
+            "detected_columns": [header for header in headers if header],
+        })
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        try:
+            db.execute(delete(TerminalInventoryItem).where(TerminalInventoryItem.channel == channel))
+            db.add_all(TerminalInventoryItem(channel=channel, updated_at=now, **row) for row in parsed)
+            metadata = db.get(TerminalInventoryMetadata, channel) or TerminalInventoryMetadata(channel=channel)
+            metadata.file_name = filename
+            metadata.sheet_name = sheet_name
+            metadata.row_count = len(parsed)
+            metadata.updated_at = now
+            db.add(metadata)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "Importazione non salvata: la giacenza precedente è rimasta invariata")
+    return {"channel": channel, "imported": len(parsed), "skipped": skipped, "updated_at": now.isoformat()}
 
 
 def serialize_terminal(item: TerminalCatalogItem) -> dict[str, Any]:

@@ -15,6 +15,15 @@ type ImportSummary={
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
   removed_assets:number; field_changes:number; campaign_changes:number; uploaded_at:string;
 };
+type ImportPreview={
+  file_name:string; file_sha256:string; row_count:number; customer_count:number; asset_count:number;
+  campaign_count:number; campaign_names:string[];
+  quality:{duplicate_asset_rows:number;rows_without_tax_id:number;rows_without_customer_code:number};
+  sample_rows:Array<{
+    row_number:number;business_name:string;customer_code:string;tax_id:string;asset_type:string;
+    asset_number:string;plan:string;status:string;monthly_fee:string;campaigns:Record<string,string>;
+  }>;
+};
 
 function App(){
   const [logged,setLogged]=useState(!!localStorage.getItem("token"));
@@ -110,41 +119,75 @@ function Customers(){
 function Imports(){
   const [history,setHistory]=useState<ImportSummary[]>([]);
   const [selected,setSelected]=useState<any>(null);
+  const [preview,setPreview]=useState<ImportPreview|null>(null);
   const [month,setMonth]=useState(new Date().toISOString().slice(0,7));
   const [file,setFile]=useState<File|null>(null);
   const [busy,setBusy]=useState(false);
   const [message,setMessage]=useState<{kind:"ok"|"error";text:string}|null>(null);
   const load=()=>fetch(API+"/windtre-imports").then(r=>r.json()).then(setHistory);
   useEffect(()=>{load()},[]);
-  async function upload(e:React.FormEvent){
+  async function analyze(e:React.FormEvent){
     e.preventDefault(); if(!file)return; setBusy(true);setMessage(null);
+    const data=new FormData();data.append("file",file);
+    try{
+      const r=await fetch(API+"/windtre-imports/preview",{method:"POST",body:data});
+      const result=await r.json();
+      if(!r.ok)throw new Error(result.detail||"Analisi non riuscita");
+      setPreview(result);
+      setMessage({kind:"ok",text:"Analisi completata. Controlla l’anteprima prima di confermare."});
+    }catch(err:any){setMessage({kind:"error",text:err.message});}
+    finally{setBusy(false);}
+  }
+  async function confirmImport(){
+    if(!file||!preview)return; setBusy(true);setMessage(null);
     const data=new FormData();data.append("competence_month",month);data.append("file",file);
     try{
       const r=await fetch(API+"/windtre-imports",{method:"POST",body:data});
       const result=await r.json();
       if(!r.ok)throw new Error(result.detail||"Importazione non riuscita");
-      setMessage({kind:"ok",text:`Importazione completata: ${result.customer_count} clienti e ${result.row_count} righe.`});
-      setFile(null); await load(); await showDetail(result.id);
+      setMessage({kind:"ok",text:`Importazione salvata: ${result.customer_count} clienti e ${result.row_count} righe.`});
+      setFile(null);setPreview(null);await load();await showDetail(result.id);
     }catch(err:any){setMessage({kind:"error",text:err.message});}
     finally{setBusy(false);}
   }
+  function chooseFile(next:File|null){setFile(next);setPreview(null);setMessage(null)}
   async function showDetail(id:string){const r=await fetch(API+"/windtre-imports/"+id);setSelected(await r.json())}
   return <main className="page">
     <div className="title"><div><small>WINDTRE BUSINESS SME</small><h1>Importazioni mensili</h1><p>Conserva ogni fotografia del portafoglio e confronta automaticamente i mesi.</p></div></div>
     <div className="importgrid">
-      <form className="uploadcard" onSubmit={upload}>
+      <form className="uploadcard" onSubmit={analyze}>
         <div className="uploadicon"><UploadCloud/></div><div><h2>Carica estrazione DB Tool</h2><p>File Excel .xlsx o .xlsm, massimo 40 MB.</p></div>
         <label>Mese di competenza<input type="month" value={month} onChange={e=>setMonth(e.target.value)} required/></label>
-        <label className="drop"><FileSpreadsheet/><span>{file?file.name:"Seleziona il file Excel"}</span><input type="file" accept=".xlsx,.xlsm" onChange={e=>setFile(e.target.files?.[0]||null)}/></label>
+        <label className="drop"><FileSpreadsheet/><span>{file?file.name:"Seleziona il file Excel"}</span><input type="file" accept=".xlsx,.xlsm" onChange={e=>chooseFile(e.target.files?.[0]||null)}/></label>
         {message&&<div className={"notice "+message.kind}>{message.kind==="ok"?<CheckCircle2/>:<XCircle/>}{message.text}</div>}
-        <button className="new" disabled={!file||busy}>{busy?"Analisi in corso…":"Importa e confronta"}</button>
+        {!preview&&<button className="new" disabled={!file||busy}>{busy?"Analisi in corso…":"Analizza il file"}</button>}
+        {preview&&<div className="previewactions"><button type="button" className="secondary" onClick={()=>{setPreview(null);setMessage(null)}}>Modifica selezione</button><button type="button" className="new" onClick={confirmImport} disabled={busy}>{busy?"Salvataggio…":"Conferma e importa"}</button></div>}
       </form>
       <article className="explain"><h2>Cosa viene controllato</h2><ul><li>Nuovi clienti e clienti non più presenti</li><li>Nuove linee, SIM e asset rimossi</li><li>Cambi di piano, stato, canone e servizi</li><li>Ingressi, uscite e livelli delle campagne V_, C_ e I_</li></ul><div className="privacy">Il file originale non viene salvato: conserviamo dati strutturati, impronta del file e storico delle differenze.</div></article>
     </div>
+    {preview&&<PreviewPanel item={preview}/>}
     <div className="sectiontitle"><div><History/><h2>Storico importazioni</h2></div><span>{history.length} estrazioni</span></div>
     <article className="tablecard">{history.length?<table><thead><tr><th>Mese</th><th>File</th><th>Clienti</th><th>Nuovi</th><th>Assenti</th><th>Variazioni</th><th></th></tr></thead><tbody>{history.map(i=><tr key={i.id}><td><b>{monthLabel(i.competence_month)}</b></td><td>{i.file_name}<small>{i.row_count} righe</small></td><td>{i.customer_count}</td><td className="positive">{i.new_customers}</td><td className="warning">{i.missing_customers}</td><td>{i.field_changes+i.campaign_changes}</td><td><button className="linkbtn" onClick={()=>showDetail(i.id)}>Dettagli</button></td></tr>)}</tbody></table>:<Empty icon={<History/>} text="Nessuna importazione nello storico"/>}</article>
     {selected&&<ImportDetail item={selected} close={()=>setSelected(null)}/>}
   </main>;
+}
+
+function PreviewPanel({item}:{item:ImportPreview}){
+  const warnings=item.quality.duplicate_asset_rows+item.quality.rows_without_tax_id+item.quality.rows_without_customer_code;
+  return <section className="previewpanel">
+    <div className="sectiontitle"><div><FileClock/><h2>Anteprima da confermare</h2></div><span>{warnings?warnings+" segnalazioni":"Dati coerenti"}</span></div>
+    <div className="miniKpis previewkpis">
+      <b>{item.customer_count}<span>Clienti</span></b><b>{item.asset_count}<span>Asset</span></b>
+      <b>{item.row_count}<span>Righe</span></b><b>{item.campaign_count}<span>Campagne</span></b>
+    </div>
+    {warnings>0&&<div className="quality">
+      <AlertTriangle/><div><b>Controlli qualità</b><p>{item.quality.duplicate_asset_rows} righe asset duplicate · {item.quality.rows_without_tax_id} senza P.IVA/C.F. · {item.quality.rows_without_customer_code} senza codice cliente</p></div>
+    </div>}
+    <div className="sampletable"><table><thead><tr><th>Riga</th><th>Cliente</th><th>Codice</th><th>Asset</th><th>Piano</th><th>Campagne</th></tr></thead><tbody>
+      {item.sample_rows.map(row=><tr key={row.row_number}><td>{row.row_number}</td><td><b>{row.business_name}</b><small>{row.tax_id||"P.IVA/C.F. non disponibile"}</small></td><td>{row.customer_code||"—"}</td><td>{row.asset_number||row.asset_type||"—"}</td><td>{row.plan||"—"}</td><td>{Object.keys(row.campaigns).length}</td></tr>)}
+    </tbody></table></div>
+    {item.row_count>item.sample_rows.length&&<p className="previewnote">Mostrate le prime {item.sample_rows.length} righe su {item.row_count}. Il salvataggio avverrà solo dopo la conferma.</p>}
+  </section>
 }
 
 function ImportDetail({item,close}:{item:any;close:()=>void}){

@@ -28,7 +28,7 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
@@ -146,6 +146,7 @@ class StoreSettings(Base):
     email: Mapped[str | None] = mapped_column(String(255))
     website: Mapped[str | None] = mapped_column(String(255))
     logo_path: Mapped[str | None] = mapped_column(String(500))
+    partner_logo_path: Mapped[str | None] = mapped_column(String(500))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -226,6 +227,28 @@ class SimInventoryImport(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class DdtShipment(Base):
+    __tablename__ = "ddt_shipments"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ddt_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    document_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    recipient_name: Mapped[str] = mapped_column(String(255), index=True)
+    recipient_address: Mapped[str] = mapped_column(String(500))
+    goods_description: Mapped[str] = mapped_column(Text)
+    carrier: Mapped[str | None] = mapped_column(String(255), index=True)
+    tracking_number: Mapped[str | None] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="IN_PREPARAZIONE", index=True)
+    sender_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    customer: Mapped[Customer | None] = relationship()
+
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -250,6 +273,22 @@ class StoreSettingsRequest(BaseModel):
     whatsapp: str | None = None
     email: str | None = None
     website: str | None = None
+
+
+class DdtShipmentRequest(BaseModel):
+    document_date: date = date.today()
+    customer_id: uuid.UUID | None = None
+    recipient_name: str
+    recipient_address: str
+    goods_description: str
+    carrier: str | None = None
+    tracking_number: str | None = None
+    status: str = "IN_PREPARAZIONE"
+
+
+class DdtStatusRequest(BaseModel):
+    status: str
+    tracking_number: str | None = None
 
 
 class ProductRequest(BaseModel):
@@ -878,6 +917,7 @@ def serialize_store_settings(item: StoreSettings) -> dict[str, Any]:
         "email": item.email or "",
         "website": item.website or "",
         "logo_url": f"/uploads/{item.logo_path}" if item.logo_path else None,
+        "partner_logo_url": f"/uploads/{item.partner_logo_path}" if item.partner_logo_path else None,
         "updated_at": item.updated_at.isoformat(),
     }
 
@@ -953,6 +993,244 @@ async def upload_store_logo(file: UploadFile = File(...)):
             if previous_path.is_file():
                 previous_path.unlink()
         return serialize_store_settings(item)
+
+
+@app.post("/api/v1/settings/store/partner-logo")
+async def upload_partner_logo(file: UploadFile = File(...)):
+    allowed_types = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+    extension = allowed_types.get(file.content_type or "")
+    if not extension:
+        raise HTTPException(422, "Carica un logo PNG, JPG o WEBP")
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Il logo supera il limite di 5 MB")
+    filename = f"partner-logo{extension}"
+    (UPLOAD_DIR / filename).write_bytes(contents)
+    with SessionLocal() as db:
+        item = get_or_create_store_settings(db)
+        previous = item.partner_logo_path
+        item.partner_logo_path = filename
+        db.commit()
+        db.refresh(item)
+        if previous and previous != filename:
+            previous_path = UPLOAD_DIR / previous
+            if previous_path.is_file():
+                previous_path.unlink()
+        return serialize_store_settings(item)
+
+
+DDT_STATUSES = {"IN_PREPARAZIONE", "SPEDITO", "CONSEGNATO", "ANNULLATO"}
+
+
+def sender_snapshot(item: StoreSettings) -> dict[str, Any]:
+    full_address = ", ".join(
+        part for part in [
+            item.address,
+            " ".join(part for part in [item.postal_code, item.city] if part),
+            f"({item.province})" if item.province else None,
+        ] if part
+    )
+    return {
+        "name": item.legal_name or item.store_name,
+        "address": full_address,
+        "tax_id": item.tax_id or item.fiscal_code or "",
+        "logo_path": item.logo_path,
+        "partner_logo_path": item.partner_logo_path,
+    }
+
+
+def generate_ddt_number(db, document_date: date) -> str:
+    prefix = f"DDT-{document_date.strftime('%Y%m%d')}-"
+    for _ in range(100):
+        number = prefix + str(uuid.uuid4().int % 1000).zfill(3)
+        if not db.scalar(select(DdtShipment.id).where(DdtShipment.ddt_number == number)):
+            return number
+    raise HTTPException(503, "Impossibile generare il numero DDT")
+
+
+def serialize_ddt(item: DdtShipment) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "ddt_number": item.ddt_number,
+        "document_date": item.document_date.isoformat(),
+        "customer_id": str(item.customer_id) if item.customer_id else None,
+        "recipient_name": item.recipient_name,
+        "recipient_address": item.recipient_address,
+        "goods_description": item.goods_description,
+        "carrier": item.carrier or "",
+        "tracking_number": item.tracking_number or "",
+        "status": item.status,
+        "sender_snapshot": item.sender_snapshot,
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def validate_ddt(data: DdtShipmentRequest):
+    if data.status not in DDT_STATUSES:
+        raise HTTPException(422, "Stato DDT non valido")
+    if not data.recipient_name.strip():
+        raise HTTPException(422, "Il destinatario è obbligatorio")
+    if not data.recipient_address.strip():
+        raise HTTPException(422, "L'indirizzo di consegna è obbligatorio")
+    if not data.goods_description.strip():
+        raise HTTPException(422, "La descrizione dei beni è obbligatoria")
+    if data.status == "SPEDITO" and not (data.tracking_number or "").strip():
+        raise HTTPException(422, "Inserisci il tracking prima di segnare il DDT come spedito")
+
+
+@app.get("/api/v1/ddt")
+def ddt_shipments(search: str = "", status: str | None = None):
+    with SessionLocal() as db:
+        query = select(DdtShipment).order_by(DdtShipment.document_date.desc(), DdtShipment.created_at.desc())
+        if status:
+            query = query.where(DdtShipment.status == status)
+        if search.strip():
+            pattern = f"%{search.strip()}%"
+            query = query.where(or_(
+                DdtShipment.ddt_number.ilike(pattern),
+                DdtShipment.recipient_name.ilike(pattern),
+                DdtShipment.carrier.ilike(pattern),
+                DdtShipment.tracking_number.ilike(pattern),
+                DdtShipment.goods_description.ilike(pattern),
+            ))
+        items = db.scalars(query).all()
+        return {
+            "items": [serialize_ddt(item) for item in items],
+            "counts": {state: sum(item.status == state for item in items) for state in DDT_STATUSES},
+        }
+
+
+@app.post("/api/v1/ddt")
+def create_ddt(data: DdtShipmentRequest):
+    validate_ddt(data)
+    with SessionLocal() as db:
+        store = get_or_create_store_settings(db)
+        item = DdtShipment(
+            ddt_number=generate_ddt_number(db, data.document_date),
+            document_date=data.document_date,
+            customer_id=data.customer_id,
+            recipient_name=data.recipient_name.strip(),
+            recipient_address=data.recipient_address.strip(),
+            goods_description=data.goods_description.strip(),
+            carrier=(data.carrier or "").strip() or None,
+            tracking_number=(data.tracking_number or "").strip() or None,
+            status=data.status,
+            sender_snapshot=sender_snapshot(store),
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_ddt(item)
+
+
+@app.put("/api/v1/ddt/{ddt_id}")
+def update_ddt(ddt_id: uuid.UUID, data: DdtShipmentRequest):
+    validate_ddt(data)
+    with SessionLocal() as db:
+        item = db.get(DdtShipment, ddt_id)
+        if not item:
+            raise HTTPException(404, "DDT non trovato")
+        if item.status == "ANNULLATO":
+            raise HTTPException(409, "Un DDT annullato non può essere modificato")
+        for field, value in data.model_dump().items():
+            setattr(item, field, value.strip() if isinstance(value, str) else value)
+        db.commit()
+        db.refresh(item)
+        return serialize_ddt(item)
+
+
+@app.patch("/api/v1/ddt/{ddt_id}/status")
+def update_ddt_status(ddt_id: uuid.UUID, data: DdtStatusRequest):
+    if data.status not in DDT_STATUSES:
+        raise HTTPException(422, "Stato DDT non valido")
+    with SessionLocal() as db:
+        item = db.get(DdtShipment, ddt_id)
+        if not item:
+            raise HTTPException(404, "DDT non trovato")
+        if item.status == "ANNULLATO":
+            raise HTTPException(409, "Un DDT annullato non può cambiare stato")
+        if data.status == "SPEDITO" and not (data.tracking_number or item.tracking_number):
+            raise HTTPException(422, "Inserisci il tracking prima della spedizione")
+        item.status = data.status
+        if data.tracking_number is not None:
+            item.tracking_number = data.tracking_number.strip() or None
+        db.commit()
+        db.refresh(item)
+        return serialize_ddt(item)
+
+
+@app.delete("/api/v1/ddt/{ddt_id}")
+def delete_ddt(ddt_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(DdtShipment, ddt_id)
+        if not item:
+            raise HTTPException(404, "DDT non trovato")
+        if item.status != "IN_PREPARAZIONE":
+            raise HTTPException(409, "Puoi eliminare solo DDT in preparazione; usa Annulla per conservarne lo storico")
+        db.delete(item)
+        db.commit()
+        return {"ok": True}
+
+
+@app.get("/api/v1/ddt/{ddt_id}/pdf")
+def ddt_pdf(ddt_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(DdtShipment, ddt_id)
+        if not item:
+            raise HTTPException(404, "DDT non trovato")
+        snapshot = item.sender_snapshot or {}
+        lines = [line.strip() for line in item.goods_description.splitlines() if line.strip()] or ["—"]
+        chunks = [lines[index:index + 15] for index in range(0, len(lines), 15)]
+        styles = getSampleStyleSheet()
+        body = ParagraphStyle("ddt-body", parent=styles["BodyText"], fontSize=9, leading=12)
+        small = ParagraphStyle("ddt-small", parent=body, fontSize=8, leading=10)
+        heading = ParagraphStyle("ddt-heading", parent=styles["Heading1"], fontSize=13, leading=16, alignment=1)
+        buffer = BytesIO()
+        document = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=12 * mm, bottomMargin=12 * mm)
+        story = []
+        for page_index, chunk in enumerate(chunks):
+            logo_path = UPLOAD_DIR / snapshot.get("logo_path", "") if snapshot.get("logo_path") else None
+            partner_path = UPLOAD_DIR / snapshot.get("partner_logo_path", "") if snapshot.get("partner_logo_path") else None
+            left_logo = Image(str(logo_path), width=35 * mm, height=15 * mm, kind="proportional") if logo_path and logo_path.is_file() else Paragraph("", body)
+            right_logo = Image(str(partner_path), width=35 * mm, height=15 * mm, kind="proportional") if partner_path and partner_path.is_file() else Paragraph("", body)
+            header = Table([[left_logo, Paragraph("DOCUMENTO DI TRASPORTO (D.D.T.)<br/><font size='8'>D.P.R. 472/96</font>", heading), right_logo]], colWidths=[45 * mm, 87 * mm, 45 * mm])
+            header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (2, 0), (2, 0), "RIGHT")]))
+            story.extend([header, Spacer(1, 4 * mm)])
+            refs = Table([[
+                Paragraph(f"<b>Numero:</b> {item.ddt_number}", body),
+                Paragraph(f"<b>Data:</b> {item.document_date.strftime('%d/%m/%Y')}", body),
+                Paragraph(f"<b>Pagina:</b> {page_index + 1} di {len(chunks)}", body),
+            ]], colWidths=[75 * mm, 55 * mm, 47 * mm])
+            refs.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .6, colors.HexColor("#9ca3af")), ("INNERGRID", (0, 0), (-1, -1), .4, colors.HexColor("#d1d5db")), ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")), ("PADDING", (0, 0), (-1, -1), 6)]))
+            story.extend([refs, Spacer(1, 4 * mm)])
+            parties = Table([[
+                Paragraph(f"<b>MITTENTE</b><br/>{snapshot.get('name', '')}<br/>{snapshot.get('address', '')}<br/>P.IVA/C.F.: {snapshot.get('tax_id', '')}", body),
+                Paragraph(f"<b>DESTINATARIO</b><br/>{item.recipient_name}<br/>{item.recipient_address}", body),
+            ]], colWidths=[88.5 * mm, 88.5 * mm])
+            parties.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#475569")), ("INNERGRID", (0, 0), (-1, -1), .4, colors.HexColor("#cbd5e1")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 8)]))
+            story.extend([parties, Spacer(1, 5 * mm)])
+            goods = [[Paragraph("<b>DESCRIZIONE DEI BENI / SERIALI / MATRICOLЕ</b>", body)]]
+            goods.extend([[Paragraph(line, body)] for line in chunk])
+            if page_index < len(chunks) - 1:
+                goods.append([Paragraph("<i>Segue a pagina successiva…</i>", small)])
+            goods_table = Table(goods, colWidths=[177 * mm], repeatRows=1)
+            goods_table.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#475569")), ("INNERGRID", (0, 0), (-1, -1), .3, colors.HexColor("#cbd5e1")), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")), ("PADDING", (0, 0), (-1, -1), 6)]))
+            story.append(goods_table)
+            if page_index == len(chunks) - 1:
+                story.extend([Spacer(1, 7 * mm), Table([[
+                    Paragraph(f"<b>VETTORE</b><br/>{item.carrier or '—'}", body),
+                    Paragraph(f"<b>TRACKING</b><br/>{item.tracking_number or '—'}", body),
+                ]], colWidths=[88.5 * mm, 88.5 * mm], style=[("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#475569")), ("INNERGRID", (0, 0), (-1, -1), .4, colors.HexColor("#cbd5e1")), ("PADDING", (0, 0), (-1, -1), 8)]), Spacer(1, 14 * mm)])
+                signatures = Table([["Firma Mittente", "Firma Vettore", "Firma Destinatario"], ["\n\n____________________", "\n\n____________________", "\n\n____________________"]], colWidths=[59 * mm] * 3)
+                signatures.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 8)]))
+                story.append(signatures)
+            if page_index < len(chunks) - 1:
+                story.append(PageBreak())
+        document.build(story)
+        buffer.seek(0)
+        headers = {"Content-Disposition": f'inline; filename="{item.ddt_number}.pdf"'}
+        return StreamingResponse(buffer, media_type="application/pdf", headers=headers)
 
 
 @app.get("/api/v1/products")

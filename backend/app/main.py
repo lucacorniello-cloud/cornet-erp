@@ -64,12 +64,26 @@ class Customer(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     segment: Mapped[str] = mapped_column(String(40), default="BUSINESS_SME")
     business_name: Mapped[str] = mapped_column(String(255), index=True)
+    first_name: Mapped[str | None] = mapped_column(String(120))
+    last_name: Mapped[str | None] = mapped_column(String(120))
     tax_id: Mapped[str | None] = mapped_column(String(32), unique=True)
     fiscal_code: Mapped[str | None] = mapped_column(String(32))
     windtre_customer_code: Mapped[str | None] = mapped_column(String(80), index=True)
     email: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(80))
     address: Mapped[str | None] = mapped_column(String(255))
+    postal_code: Mapped[str | None] = mapped_column(String(12))
+    city: Mapped[str | None] = mapped_column(String(120))
+    province: Mapped[str | None] = mapped_column(String(8))
+    birth_date: Mapped[date | None] = mapped_column(Date)
+    birth_place: Mapped[str | None] = mapped_column(String(120))
+    birth_province: Mapped[str | None] = mapped_column(String(8))
+    gender: Mapped[str | None] = mapped_column(String(10))
+    document_type: Mapped[str | None] = mapped_column(String(80))
+    document_number: Mapped[str | None] = mapped_column(String(80))
+    document_issue_date: Mapped[date | None] = mapped_column(Date)
+    document_expiry_date: Mapped[date | None] = mapped_column(Date)
+    document_issuer: Mapped[str | None] = mapped_column(String(160))
     portfolio_status: Mapped[str] = mapped_column(String(40), default="ACTIVE")
     first_seen_month: Mapped[str | None] = mapped_column(String(7))
     last_seen_month: Mapped[str | None] = mapped_column(String(7))
@@ -568,8 +582,26 @@ class SimInventoryUpdate(BaseModel):
 
 class QuickCustomerRequest(BaseModel):
     business_name: str
+    segment: str = "MICROBUSINESS"
+    first_name: str | None = None
+    last_name: str | None = None
     tax_id: str | None = None
+    fiscal_code: str | None = None
     address: str | None = None
+    postal_code: str | None = None
+    city: str | None = None
+    province: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    birth_date: date | None = None
+    birth_place: str | None = None
+    birth_province: str | None = None
+    gender: str | None = None
+    document_type: str | None = None
+    document_number: str | None = None
+    document_issue_date: date | None = None
+    document_expiry_date: date | None = None
+    document_issuer: str | None = None
 
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
@@ -2810,19 +2842,53 @@ def sim_report():
 def quick_create_customer(data: QuickCustomerRequest):
     name = data.business_name.strip()
     if not name:
-        raise HTTPException(422, "Ragione sociale obbligatoria")
+        raise HTTPException(422, "Nome cliente obbligatorio")
+    if data.segment not in {"CONSUMER", "MICROBUSINESS", "BUSINESS_SME"}:
+        raise HTTPException(422, "Segmento cliente non valido")
     with SessionLocal() as db:
         tax_id = (data.tax_id or "").strip() or None
+        fiscal_code = (data.fiscal_code or "").strip() or None
         if tax_id and db.scalar(select(Customer).where(Customer.tax_id == tax_id)):
+            raise HTTPException(409, "Cliente già presente")
+        if fiscal_code and db.scalar(select(Customer).where(Customer.fiscal_code == fiscal_code)):
             raise HTTPException(409, "Cliente già presente")
         item = Customer(
             business_name=name,
             tax_id=tax_id,
+            fiscal_code=fiscal_code,
             address=(data.address or "").strip() or None,
-            segment="MICROBUSINESS",
+            segment=data.segment,
             portfolio_status="ACTIVE",
         )
+        for field in (
+            "first_name", "last_name", "postal_code", "city", "province", "email", "phone", "birth_date",
+            "birth_place", "birth_province", "gender", "document_type", "document_number",
+            "document_issue_date", "document_expiry_date", "document_issuer",
+        ):
+            value = getattr(data, field)
+            setattr(item, field, value.strip() or None if isinstance(value, str) else value)
         db.add(item)
+        db.commit()
+        return {"id": str(item.id), "business_name": item.business_name}
+
+
+@app.put("/api/v1/customers/{customer_id}")
+def update_customer(customer_id: uuid.UUID, data: QuickCustomerRequest):
+    with SessionLocal() as db:
+        item = db.get(Customer, customer_id)
+        if not item:
+            raise HTTPException(404, "Cliente non trovato")
+        if data.segment not in {"CONSUMER", "MICROBUSINESS", "BUSINESS_SME"}:
+            raise HTTPException(422, "Segmento cliente non valido")
+        item.business_name = data.business_name.strip()
+        item.segment = data.segment
+        for field in (
+            "first_name", "last_name", "tax_id", "fiscal_code", "address", "postal_code", "city", "province",
+            "email", "phone", "birth_date", "birth_place", "birth_province", "gender", "document_type",
+            "document_number", "document_issue_date", "document_expiry_date", "document_issuer",
+        ):
+            value = getattr(data, field)
+            setattr(item, field, value.strip() or None if isinstance(value, str) else value)
         db.commit()
         return {"id": str(item.id), "business_name": item.business_name}
 
@@ -2919,6 +2985,8 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                     Customer.tax_id.ilike(pattern),
                     Customer.fiscal_code.ilike(pattern),
                     Customer.windtre_customer_code.ilike(pattern),
+                    Customer.email.ilike(pattern),
+                    Customer.phone.ilike(pattern),
                 )
             )
         items = db.scalars(query).all()
@@ -2945,6 +3013,8 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
             {
                 "id": str(item.id),
                 "business_name": item.business_name,
+                "first_name": item.first_name,
+                "last_name": item.last_name,
                 "segment": item.segment,
                 "tax_id": item.tax_id,
                 "fiscal_code": item.fiscal_code,
@@ -2953,6 +3023,8 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                 "first_seen_month": item.first_seen_month,
                 "last_seen_month": item.last_seen_month,
                 "monthly_spend": monthly_spend_by_customer.get(item.id, 0),
+                "email": item.email,
+                "phone": item.phone,
             }
             for item in items
         ]
@@ -2982,9 +3054,30 @@ def customer_detail(customer_id: uuid.UUID):
             else []
         )
         monthly_spend = round(sum(parse_monthly_fee(row.monthly_fee) for row in latest_rows), 2)
+        imported_numbers = {clean(row.asset_number) for row in latest_rows if clean(row.asset_number)}
+        inventory_sims = db.scalars(
+            select(SimInventory).where(SimInventory.customer_id == customer_id).order_by(SimInventory.msisdn, SimInventory.iccid)
+        ).all()
+        sim_assets = [
+            {
+                "asset_key": f"SIM:{sim.id}",
+                "asset_type": "SIM MOBILE",
+                "asset_number": sim.msisdn or sim.iccid,
+                "plan": sim.product.name if sim.product else "",
+                "status": sim.status,
+                "monthly_fee": "",
+                "activation_date": sim.updated_at.isoformat() if sim.status == "ATTIVATA" else None,
+                "details": [{"key": "ICCID", "label": "ICCID", "value": sim.iccid}],
+                "campaigns": {},
+            }
+            for sim in inventory_sims
+            if not sim.msisdn or clean(sim.msisdn) not in imported_numbers
+        ]
         return {
             "id": str(customer.id),
             "business_name": customer.business_name,
+            "first_name": customer.first_name,
+            "last_name": customer.last_name,
             "segment": customer.segment,
             "tax_id": customer.tax_id,
             "fiscal_code": customer.fiscal_code,
@@ -2992,6 +3085,18 @@ def customer_detail(customer_id: uuid.UUID):
             "email": customer.email,
             "phone": customer.phone,
             "address": customer.address,
+            "postal_code": customer.postal_code,
+            "city": customer.city,
+            "province": customer.province,
+            "birth_date": customer.birth_date.isoformat() if customer.birth_date else None,
+            "birth_place": customer.birth_place,
+            "birth_province": customer.birth_province,
+            "gender": customer.gender,
+            "document_type": customer.document_type,
+            "document_number": customer.document_number,
+            "document_issue_date": customer.document_issue_date.isoformat() if customer.document_issue_date else None,
+            "document_expiry_date": customer.document_expiry_date.isoformat() if customer.document_expiry_date else None,
+            "document_issuer": customer.document_issuer,
             "portfolio_status": customer.portfolio_status,
             "first_seen_month": customer.first_seen_month,
             "last_seen_month": customer.last_seen_month,
@@ -3010,7 +3115,7 @@ def customer_detail(customer_id: uuid.UUID):
                     "campaigns": row.campaigns,
                 }
                 for row in latest_rows[-100:]
-            ],
+            ] + sim_assets,
         }
 
 

@@ -24,7 +24,7 @@ import xlrd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
@@ -112,6 +112,51 @@ class CustomerAccountCode(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class IncentiveCompetition(Base):
+    __tablename__ = "incentive_competitions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    operator: Mapped[str] = mapped_column(String(80), default="WINDTRE", index=True)
+    market: Mapped[str] = mapped_column(String(80), default="MIXED")
+    dealer_code: Mapped[str | None] = mapped_column(String(80))
+    start_date: Mapped[date] = mapped_column(Date, index=True)
+    end_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
+    source_document: Mapped[str | None] = mapped_column(String(500))
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class IncentiveActivation(Base):
+    __tablename__ = "incentive_activations"
+    __table_args__ = (
+        UniqueConstraint("competition_id", "source_key", name="uq_incentive_activation_source"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    competition_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incentive_competitions.id", ondelete="CASCADE"), index=True
+    )
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    activation_date: Mapped[date] = mapped_column(Date, index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="MANUAL")
+    source_key: Mapped[str] = mapped_column(String(255))
+    seller_name: Mapped[str | None] = mapped_column(String(255))
+    track: Mapped[str] = mapped_column(String(40), index=True)
+    offer: Mapped[str | None] = mapped_column(String(255))
+    asset_number: Mapped[str | None] = mapped_column(String(120))
+    monthly_fee_cents: Mapped[int] = mapped_column(Integer, default=0)
+    direct_bonus_cents: Mapped[int] = mapped_column(Integer, default=0)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="VALID", index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class WindTreImport(Base):
@@ -628,6 +673,32 @@ class CustomerAccountCodeRequest(BaseModel):
     market: str
     customer_code: str
     is_primary: bool = True
+
+
+class IncentiveCompetitionRequest(BaseModel):
+    name: str
+    operator: str = "WINDTRE"
+    market: str = "MIXED"
+    dealer_code: str | None = None
+    start_date: date
+    end_date: date
+    status: str = "DRAFT"
+    source_document: str | None = None
+    configuration: dict[str, Any]
+
+
+class IncentiveActivationRequest(BaseModel):
+    activation_date: date
+    customer_id: uuid.UUID | None = None
+    seller_name: str | None = None
+    track: str
+    offer: str | None = None
+    asset_number: str | None = None
+    monthly_fee: float = 0
+    direct_bonus: float = 0
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    status: str = "VALID"
+    notes: str | None = None
 
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
@@ -1192,6 +1263,204 @@ def order_share_text(item: SimOrder) -> str:
         lines.extend(["", f"Note: {item.notes}"])
     lines.append(f"\nTotale: {sum(line.quantity for line in item.lines)} SIM")
     return "\n".join(lines)
+
+
+def march_2026_incentive_configuration() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "source": "Lettera WINDTRE Incentivazione Marzo 2026",
+        "tracks": {
+            "MOBILE": {
+                "label": "Attivazioni mobili",
+                "access_threshold": 25,
+                "thresholds": [
+                    {"target": 25, "label": "1a soglia", "mnp_multiplier": 2.25, "no_mnp_multiplier": 0.5, "tied_extra_multiplier": 0.75},
+                    {"target": 55, "label": "2a soglia", "mnp_multiplier": 3.25, "no_mnp_multiplier": 1.0, "tied_extra_multiplier": 0.75},
+                    {"target": 105, "label": "3a soglia", "mnp_multiplier": 3.75, "no_mnp_multiplier": 1.5, "tied_extra_multiplier": 1.0},
+                    {"target": 143, "label": "4a soglia", "mnp_multiplier": 4.25, "no_mnp_multiplier": 2.0, "tied_extra_multiplier": 1.0},
+                ],
+                "rules": [
+                    {"code": "VERY", "label": "Very Mobile (esclusa MNP intrabrand)", "points": 0.5},
+                    {"code": "SECURE", "label": "Più Sicuri Mobile/Pro contestuale", "points": 1.25},
+                    {"code": "PHONE_INCLUDED", "label": "Tied con Telefono Incluso standard o Rata Smart 1° device", "extra_points": 1.25},
+                    {"code": "TIED_PREMIUM", "label": "Tied Start/Unlimited/Unlimited Pro/Pack Reload Exchange", "extra_points": 0.5},
+                    {"code": "TIED_PIVA", "label": "Tied Partita IVA", "extra_points": 1.0},
+                    {"code": "TRAVEL", "label": "Offerte Travel", "excluded": True},
+                ],
+            },
+            "FIXED": {
+                "label": "Fisso e convergenza",
+                "access_threshold": 4,
+                "thresholds": [
+                    {"target": 4, "label": "1a soglia", "convergent_multiplier": 4.75, "standard_multiplier": 3.25},
+                    {"target": 8, "label": "2a soglia", "convergent_multiplier": 5.0, "standard_multiplier": 3.5},
+                    {"target": 15, "label": "3a soglia", "convergent_multiplier": 5.5, "standard_multiplier": 4.0},
+                    {"target": 23, "label": "4a soglia", "convergent_multiplier": 6.25, "standard_multiplier": 4.75},
+                    {"target": 36, "label": "Soglia extra", "convergent_multiplier": 7.25, "standard_multiplier": 5.75},
+                ],
+                "rules": [
+                    {"code": "PIVA", "label": "Cliente P.IVA (1a e 2a linea)", "extra_multiplier": 1.0},
+                    {"code": "FTTH", "label": "FTTH prima linea", "extra_multiplier": 1.0},
+                    {"code": "FWA", "label": "FWA Indoor 2P/Outdoor prima linea", "extra_multiplier": 1.5},
+                    {"code": "SECOND_PRO", "label": "Seconda linea Professional", "points": 1.5},
+                    {"code": "PRO_BOX", "label": "Professional Box con FRITZ!Box", "points": 4.0},
+                ],
+            },
+            "CUSTOMER_BASE": {
+                "label": "Customer Base",
+                "access_threshold": 0,
+                "thresholds": [],
+                "rules": [{"code": "DIRECT", "label": "Gettoni configurabili per evento"}],
+            },
+            "RELOAD": {
+                "label": "Smartphone Reload",
+                "access_threshold": 0,
+                "thresholds": [
+                    {"target": 25, "label": "Attachment 25%", "bonus_multiplier": 2.0},
+                    {"target": 40, "label": "Attachment 40%", "bonus_multiplier": 3.0},
+                    {"target": 55, "label": "Attachment 55%", "bonus_multiplier": 4.0},
+                ],
+                "rules": [{"code": "ATTACHMENT", "label": "Incidenza Reload sul totale device"}],
+            },
+        },
+        "validation_rules": [
+            "Evento inserito e attivato nel periodo di gara",
+            "Linea attiva e non sospesa alla consuntivazione",
+            "MNP espletata; escluse POPI e migrazioni non ammesse",
+            "Verifica rinnovi, silenza, disconoscimenti e storni successivi",
+        ],
+    }
+
+
+def serialize_incentive_competition(item: IncentiveCompetition) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "name": item.name, "operator": item.operator, "market": item.market,
+        "dealer_code": item.dealer_code or "", "start_date": item.start_date.isoformat(),
+        "end_date": item.end_date.isoformat(), "status": item.status,
+        "source_document": item.source_document or "", "configuration": item.configuration or {},
+        "created_at": item.created_at.isoformat(),
+    }
+
+
+def serialize_incentive_activation(item: IncentiveActivation, customer_name: str | None = None) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "competition_id": str(item.competition_id),
+        "customer_id": str(item.customer_id) if item.customer_id else None,
+        "customer_name": customer_name or "", "activation_date": item.activation_date.isoformat(),
+        "source_type": item.source_type, "source_key": item.source_key, "seller_name": item.seller_name or "",
+        "track": item.track, "offer": item.offer or "", "asset_number": item.asset_number or "",
+        "monthly_fee": item.monthly_fee_cents / 100, "direct_bonus": item.direct_bonus_cents / 100,
+        "attributes": item.attributes or {}, "status": item.status, "notes": item.notes or "",
+    }
+
+
+def incentive_threshold(track_config: dict[str, Any], points: float) -> dict[str, Any] | None:
+    reached = [item for item in track_config.get("thresholds", []) if points >= float(item.get("target", 0))]
+    return max(reached, key=lambda item: float(item.get("target", 0))) if reached else None
+
+
+def incentive_activation_points(item: IncentiveActivation) -> float:
+    if item.status != "VALID":
+        return 0.0
+    attrs = item.attributes or {}
+    offer = (item.offer or "").upper()
+    if attrs.get("excluded") or (item.track == "MOBILE" and "TRAVEL" in offer):
+        return 0.0
+    if item.track == "MOBILE":
+        if attrs.get("very_mobile"):
+            return 0.0 if attrs.get("intrabrand_mnp") else 0.5
+        points = 1.25 if attrs.get("secure_option") else 1.0
+        if attrs.get("phone_included"):
+            points += 1.25
+        if attrs.get("premium_tied_offer"):
+            points += 0.5
+        if attrs.get("tied") and attrs.get("piva"):
+            points += 1.0
+        return points
+    if item.track == "FIXED":
+        if attrs.get("professional_box"):
+            return 4.0
+        if attrs.get("second_professional"):
+            return 1.5
+        if attrs.get("piva") and (attrs.get("first_line", True) or attrs.get("fwa")):
+            return 1.5
+        return 1.0
+    return 1.0
+
+
+def incentive_report(db, competition: IncentiveCompetition) -> dict[str, Any]:
+    activations = db.scalars(
+        select(IncentiveActivation)
+        .where(IncentiveActivation.competition_id == competition.id)
+        .order_by(IncentiveActivation.activation_date, IncentiveActivation.created_at)
+    ).all()
+    config = competition.configuration or {}
+    track_configs = config.get("tracks", {})
+    points_by_track: dict[str, float] = defaultdict(float)
+    for item in activations:
+        points_by_track[item.track] += incentive_activation_points(item)
+    reload_events = [item for item in activations if item.track == "RELOAD" and item.status == "VALID"]
+    reload_device_total = sum(max(1, int((item.attributes or {}).get("device_total", 1))) for item in reload_events)
+    reload_rate = (len(reload_events) / reload_device_total * 100) if reload_device_total else 0
+    rows = []
+    commissioning_total = 0.0
+    for item in activations:
+        attrs = item.attributes or {}
+        points = incentive_activation_points(item)
+        track_config = track_configs.get(item.track, {})
+        threshold_basis = reload_rate if item.track == "RELOAD" else points_by_track[item.track]
+        threshold = incentive_threshold(track_config, threshold_basis)
+        access = float(track_config.get("access_threshold", 0))
+        eligible = item.status == "VALID" and points > 0 and points_by_track[item.track] >= access
+        multiplier = 0.0
+        if eligible and threshold:
+            if item.track == "MOBILE":
+                multiplier = float(threshold.get("mnp_multiplier" if attrs.get("mnp") else "no_mnp_multiplier", 0))
+                if attrs.get("tied"):
+                    multiplier += float(threshold.get("tied_extra_multiplier", 0))
+            elif item.track == "FIXED":
+                multiplier = float(threshold.get("convergent_multiplier" if attrs.get("convergent") else "standard_multiplier", 0))
+                if attrs.get("piva"):
+                    multiplier += 1.0
+                if attrs.get("ftth") and attrs.get("first_line", True):
+                    multiplier += 1.0
+                if attrs.get("fwa") and attrs.get("first_line", True):
+                    multiplier += 1.5
+            elif item.track == "RELOAD":
+                multiplier = float(threshold.get("bonus_multiplier", 1))
+        direct_bonus = item.direct_bonus_cents / 100 if eligible else 0.0
+        commission = round((item.monthly_fee_cents / 100) * multiplier + direct_bonus * (multiplier if item.track == "RELOAD" and threshold else 1), 2)
+        commissioning_total += commission
+        rows.append({
+            **serialize_incentive_activation(item, db.get(Customer, item.customer_id).business_name if item.customer_id and db.get(Customer, item.customer_id) else ""),
+            "points": round(points, 2), "eligible": eligible,
+            "threshold": threshold.get("label") if threshold else "Non raggiunta",
+            "multiplier": multiplier, "commission": commission,
+        })
+    track_summaries = []
+    for code, track_config in track_configs.items():
+        points = round(points_by_track.get(code, 0), 2)
+        basis = reload_rate if code == "RELOAD" else points
+        reached = incentive_threshold(track_config, basis)
+        thresholds = sorted(track_config.get("thresholds", []), key=lambda item: float(item.get("target", 0)))
+        next_threshold = next((item for item in thresholds if basis < float(item.get("target", 0))), None)
+        track_summaries.append({
+            "track": code, "label": track_config.get("label", code), "points": points,
+            "events": sum(item.track == code for item in activations),
+            "valid_events": sum(item.track == code and item.status == "VALID" for item in activations),
+            "access_threshold": track_config.get("access_threshold", 0),
+            "reached": reached.get("label") if reached else "Non raggiunta",
+            "next_target": next_threshold.get("target") if next_threshold else None,
+            "remaining": round(max(0, float(next_threshold.get("target", 0)) - basis), 2) if next_threshold else 0,
+            "attachment_rate": round(reload_rate, 2) if code == "RELOAD" else None,
+            "commission": round(sum(row["commission"] for row in rows if row["track"] == code), 2),
+        })
+    return {
+        "competition": serialize_incentive_competition(competition),
+        "tracks": track_summaries, "activations": rows,
+        "total_events": len(activations), "valid_events": sum(item.status == "VALID" for item in activations),
+        "commissioning_total": round(commissioning_total, 2),
+    }
 
 
 @asynccontextmanager
@@ -3017,6 +3286,260 @@ def delete_customer_account_code(customer_id: uuid.UUID, account_code_id: uuid.U
             customer.windtre_customer_code = replacement.customer_code if replacement else None
         db.commit()
         return {"deleted": True}
+
+
+@app.get("/api/v1/incentives")
+def incentive_competitions():
+    with SessionLocal() as db:
+        items = db.scalars(
+            select(IncentiveCompetition).order_by(IncentiveCompetition.start_date.desc(), IncentiveCompetition.created_at.desc())
+        ).all()
+        return [serialize_incentive_competition(item) for item in items]
+
+
+@app.post("/api/v1/incentives/templates/windtre-march-2026")
+def create_march_2026_incentive_template():
+    with SessionLocal() as db:
+        existing = db.scalar(
+            select(IncentiveCompetition).where(
+                IncentiveCompetition.operator == "WINDTRE",
+                IncentiveCompetition.start_date == date(2026, 3, 1),
+                IncentiveCompetition.end_date == date(2026, 3, 31),
+            )
+        )
+        if existing:
+            return serialize_incentive_competition(existing)
+        store = db.scalar(select(StoreSettings).limit(1))
+        item = IncentiveCompetition(
+            name="Gara WINDTRE Marzo 2026",
+            operator="WINDTRE",
+            market="CONSUMER_MICROBUSINESS",
+            dealer_code=store.dealer_code if store else None,
+            start_date=date(2026, 3, 1),
+            end_date=date(2026, 3, 31),
+            status="ACTIVE",
+            source_document="Gara_Marzo_2026.pdf",
+            configuration=march_2026_incentive_configuration(),
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_incentive_competition(item)
+
+
+@app.post("/api/v1/incentives")
+def create_incentive_competition(data: IncentiveCompetitionRequest):
+    if data.end_date < data.start_date:
+        raise HTTPException(422, "La data finale deve essere successiva a quella iniziale")
+    with SessionLocal() as db:
+        item = IncentiveCompetition(
+            name=data.name.strip(), operator=normalize_header(data.operator), market=normalize_header(data.market),
+            dealer_code=clean(data.dealer_code) or None, start_date=data.start_date, end_date=data.end_date,
+            status=normalize_header(data.status), source_document=clean(data.source_document) or None,
+            configuration=data.configuration,
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_incentive_competition(item)
+
+
+@app.put("/api/v1/incentives/{competition_id}")
+def update_incentive_competition(competition_id: uuid.UUID, data: IncentiveCompetitionRequest):
+    if data.end_date < data.start_date:
+        raise HTTPException(422, "La data finale deve essere successiva a quella iniziale")
+    with SessionLocal() as db:
+        item = db.get(IncentiveCompetition, competition_id)
+        if not item:
+            raise HTTPException(404, "Gara non trovata")
+        item.name = data.name.strip()
+        item.operator = normalize_header(data.operator)
+        item.market = normalize_header(data.market)
+        item.dealer_code = clean(data.dealer_code) or None
+        item.start_date = data.start_date
+        item.end_date = data.end_date
+        item.status = normalize_header(data.status)
+        item.source_document = clean(data.source_document) or None
+        item.configuration = data.configuration
+        db.commit()
+        return serialize_incentive_competition(item)
+
+
+@app.post("/api/v1/incentives/{competition_id}/activations")
+def create_incentive_activation(competition_id: uuid.UUID, data: IncentiveActivationRequest):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        if not competition.start_date <= data.activation_date <= competition.end_date:
+            raise HTTPException(422, "La data di attivazione non rientra nel periodo di gara")
+        track = normalize_header(data.track)
+        if track not in (competition.configuration or {}).get("tracks", {}):
+            raise HTTPException(422, "Pista non configurata")
+        item = IncentiveActivation(
+            competition_id=competition_id, customer_id=data.customer_id, activation_date=data.activation_date,
+            source_type="MANUAL", source_key=f"MANUAL:{uuid.uuid4()}", seller_name=clean(data.seller_name) or None,
+            track=track, offer=clean(data.offer) or None, asset_number=clean(data.asset_number) or None,
+            monthly_fee_cents=round(data.monthly_fee * 100), direct_bonus_cents=round(data.direct_bonus * 100),
+            attributes=data.attributes, status=normalize_header(data.status), notes=clean(data.notes) or None,
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_incentive_activation(item)
+
+
+@app.delete("/api/v1/incentives/{competition_id}/activations/{activation_id}")
+def delete_incentive_activation(competition_id: uuid.UUID, activation_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(IncentiveActivation, activation_id)
+        if not item or item.competition_id != competition_id:
+            raise HTTPException(404, "Attivazione non trovata")
+        db.delete(item)
+        db.commit()
+        return {"deleted": True}
+
+
+@app.post("/api/v1/incentives/{competition_id}/sync-windtre")
+def sync_incentive_activations(competition_id: uuid.UUID):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        latest_import = db.scalar(
+            select(WindTreImport).order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc()).limit(1)
+        )
+        if not latest_import:
+            raise HTTPException(422, "Non sono presenti estrazioni WINDTRE")
+        rows = db.scalars(select(WindTreImportRow).where(WindTreImportRow.import_id == latest_import.id)).all()
+        existing_keys = set(db.scalars(
+            select(IncentiveActivation.source_key).where(IncentiveActivation.competition_id == competition_id)
+        ).all())
+        added = skipped = 0
+        for row in rows:
+            activation_text = find_activation_date(row.raw_data)
+            if not activation_text:
+                skipped += 1
+                continue
+            try:
+                activation_date = date.fromisoformat(activation_text[:10])
+            except ValueError:
+                skipped += 1
+                continue
+            if not competition.start_date <= activation_date <= competition.end_date:
+                continue
+            category = classify_asset(row)
+            track = "MOBILE" if category.startswith("MOBILE") else "FIXED" if category == "FIXED_DATA" else None
+            if not track:
+                continue
+            source_key = f"DBTOOL:{row.customer_id}:{row.asset_key}:{activation_date.isoformat()}"
+            if source_key in existing_keys:
+                continue
+            customer = db.get(Customer, row.customer_id) if row.customer_id else None
+            raw = {normalize_header(key): clean(value) for key, value in (row.raw_data or {}).items()}
+            raw_text = " ".join(f"{key} {value}" for key, value in raw.items()).upper()
+            offer = row.current_plan or ""
+            status_text = (row.current_status or "").upper()
+            attrs = {
+                "mnp": "MNP" in raw_text and not any(token in raw_text for token in ("NO MNP", "NOMNP")),
+                "tied": any(token in raw_text or token in offer.upper() for token in ("TIED", "EASY PAY", "EASYPAY")),
+                "piva": bool(customer and customer.tax_id),
+                "convergent": any("CONVERGEN" in key and value.upper() not in {"", "NO", "N", "0"} for key, value in raw.items()),
+                "ftth": "FTTH" in raw_text,
+                "fwa": "FWA" in raw_text,
+                "first_line": not any(token in raw_text for token in ("2 LINEA", "SECONDA LINEA", "2° LINEA")),
+                "second_professional": any(token in raw_text for token in ("2 LINEA PROFESSIONAL", "SECONDA LINEA PROFESSIONAL")),
+                "professional_box": "PROFESSIONAL BOX" in raw_text and ("FRITZ" in raw_text or "FRITZ" in offer.upper()),
+                "secure_option": "PIU SICURI" in raw_text or "PIÙ SICURI" in raw_text,
+                "phone_included": "TELEFONO INCLUSO" in raw_text,
+                "premium_tied_offer": any(token in offer.upper() for token in ("START UNLIMITED", "UNLIMITED 5G", "UNLIMITED PRO", "RELOAD EXCHANGE")),
+            }
+            item = IncentiveActivation(
+                competition_id=competition_id, customer_id=row.customer_id, activation_date=activation_date,
+                source_type="DB_TOOL", source_key=source_key, track=track, offer=row.current_plan,
+                asset_number=row.asset_number, monthly_fee_cents=round(parse_monthly_fee(row.monthly_fee) * 100),
+                attributes=attrs, status="VALID" if not status_text or status_text in {"ATT", "ACTIVE", "ATTIVO", "ATTIVA"} else "TO_VERIFY",
+            )
+            db.add(item)
+            existing_keys.add(source_key)
+            added += 1
+        db.commit()
+        return {"added": added, "skipped_without_activation_date": skipped, "source_import": latest_import.file_name}
+
+
+@app.get("/api/v1/incentives/{competition_id}/report")
+def get_incentive_report(competition_id: uuid.UUID):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        return incentive_report(db, competition)
+
+
+@app.get("/api/v1/incentives/{competition_id}/report.xlsx")
+def export_incentive_report_excel(competition_id: uuid.UUID):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        report = incentive_report(db, competition)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Soglie"
+    sheet.append(["Pista", "Eventi validi", "Punti", "Soglia raggiunta", "Prossimo target", "Mancanti", "Commissioning"])
+    for item in report["tracks"]:
+        sheet.append([item["label"], item["valid_events"], item["points"], item["reached"], item["next_target"], item["remaining"], item["commission"]])
+    sheet.append(["TOTALE", report["valid_events"], "", "", "", "", report["commissioning_total"]])
+    detail = workbook.create_sheet("Commissioning")
+    detail.append(["Data", "Cliente", "Pista", "Utenza", "Offerta", "Canone", "Punti", "Soglia", "Moltiplicatore", "Gettone", "Commissione", "Esito"])
+    for item in report["activations"]:
+        detail.append([
+            item["activation_date"], item["customer_name"], item["track"], item["asset_number"], item["offer"],
+            item["monthly_fee"], item["points"], item["threshold"], item["multiplier"], item["direct_bonus"],
+            item["commission"], "Valida" if item["eligible"] else "Non remunerata",
+        ])
+    for current in (sheet, detail):
+        current.freeze_panes = "A2"
+        current.auto_filter.ref = current.dimensions
+        for cell in current[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="18233A")
+        for column in current.columns:
+            current.column_dimensions[column[0].column_letter].width = min(36, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    filename = f"Report_Gara_{competition.start_date.strftime('%Y_%m')}.xlsx"
+    return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/v1/incentives/{competition_id}/report.pdf")
+def export_incentive_report_pdf(competition_id: uuid.UUID):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        report = incentive_report(db, competition)
+    stream = BytesIO()
+    document = SimpleDocTemplate(stream, pagesize=landscape(A4), leftMargin=14 * mm, rightMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
+    styles = getSampleStyleSheet()
+    story = [Paragraph(competition.name, styles["Title"]), Paragraph(f"Periodo {competition.start_date.strftime('%d/%m/%Y')} - {competition.end_date.strftime('%d/%m/%Y')} · Dealer {competition.dealer_code or 'non indicato'}", styles["Normal"]), Spacer(1, 5 * mm)]
+    threshold_data = [["Pista", "Validi", "Punti", "Soglia", "Mancanti", "Commissioning"]]
+    threshold_data += [[item["label"], item["valid_events"], item["points"], item["reached"], item["remaining"], f"€ {item['commission']:.2f}"] for item in report["tracks"]]
+    threshold_data.append(["TOTALE", report["valid_events"], "", "", "", f"€ {report['commissioning_total']:.2f}"])
+    table = Table(threshold_data, repeatRows=1, colWidths=[62*mm, 22*mm, 22*mm, 35*mm, 25*mm, 35*mm])
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#18233A")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#CBD2DD")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white,colors.HexColor("#F4F6F9")]),("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),("ALIGN",(1,1),(-1,-1),"RIGHT"),("BOTTOMPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6)]))
+    story.extend([table, Spacer(1, 7*mm), Paragraph("Dettaglio commissioning", styles["Heading2"])])
+    detail_data = [["Data", "Cliente", "Pista", "Utenza", "Offerta", "Punti", "Moltip.", "Commissione"]]
+    for item in report["activations"]:
+        detail_data.append([item["activation_date"], item["customer_name"][:25], item["track"], item["asset_number"], item["offer"][:28], item["points"], item["multiplier"], f"€ {item['commission']:.2f}"])
+    detail_table = Table(detail_data, repeatRows=1, colWidths=[24*mm,42*mm,22*mm,30*mm,56*mm,17*mm,20*mm,27*mm])
+    detail_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#18233A")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#D6DBE4")),("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F7F8FA")])]))
+    story.append(detail_table)
+    document.build(story)
+    stream.seek(0)
+    filename = f"Report_Gara_{competition.start_date.strftime('%Y_%m')}.pdf"
+    return StreamingResponse(stream, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/v1/dashboard/summary")

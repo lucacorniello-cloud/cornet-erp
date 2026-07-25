@@ -1276,7 +1276,7 @@ def letterhead_pdf(data: LetterheadGenerateRequest):
             footer = " | ".join(part for part in [item.company_name, item.company_address, f"P.IVA/CF {item.tax_id}" if item.tax_id else None, item.phone, item.email, item.pec, item.website] if part)
             draw_wrapped_text(pdf, footer, margin, footer_y + 5 * mm, width - 2 * margin, size=7.5, leading=9)
         else:
-            sender_y = height - margin - 4 * mm
+            sender_y = logo_y - 3 * mm if logo_path else height - margin - 4 * mm
             pdf.setFillColor(primary); pdf.setFont("Helvetica-Bold", 10); pdf.drawString(margin, sender_y, item.company_name)
             draw_wrapped_text(pdf, item.company_address or "", margin, sender_y - 5 * mm, 90 * mm, size=7.5, leading=9)
             recipient_x = max(margin, 115 * mm - item.recipient_offset_mm * mm)

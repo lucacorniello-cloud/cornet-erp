@@ -285,6 +285,11 @@ function IncentiveCompetitions(){
   const [message,setMessage]=useState("");
   const [busy,setBusy]=useState(false);
   const [showActivation,setShowActivation]=useState(false);
+  const [pdcFile,setPdcFile]=useState<File|null>(null);
+  const [pdcPreview,setPdcPreview]=useState<any>(null);
+  const [pdcHistory,setPdcHistory]=useState<any[]>([]);
+  const [includeMobile,setIncludeMobile]=useState(false);
+  const [pdcSeller,setPdcSeller]=useState("");
   const emptyActivation={activation_date:"2026-03-01",track:"MOBILE",customer_id:"",seller_name:"",asset_number:"",offer:"",monthly_fee:0,direct_bonus:0,status:"VALID",attributes:{mnp:false,tied:false,piva:false,convergent:false,ftth:false,fwa:false,first_line:true,very_mobile:false,secure_option:false,phone_included:false,premium_tied_offer:false}};
   const [activation,setActivation]=useState<any>(emptyActivation);
   const load=async()=>{
@@ -293,8 +298,9 @@ function IncentiveCompetitions(){
     else if(selected){const fresh=list.find((item:any)=>item.id===selected.id);if(fresh)setSelected(fresh)}
   };
   const loadReport=async(id:string)=>setReport(await fetch(`${API}/incentives/${id}/report`).then(r=>r.json()));
+  const loadPdcHistory=async(id:string)=>setPdcHistory(await fetch(`${API}/incentives/${id}/pdc-imports`).then(r=>r.json()));
   useEffect(()=>{load()},[]);
-  useEffect(()=>{if(selected?.id){setReport(null);loadReport(selected.id);setActivation({...emptyActivation,activation_date:selected.start_date})}},[selected?.id]);
+  useEffect(()=>{if(selected?.id){setReport(null);setPdcPreview(null);setPdcFile(null);loadReport(selected.id);loadPdcHistory(selected.id);setActivation({...emptyActivation,activation_date:selected.start_date})}},[selected?.id]);
   async function createMarch(){
     setBusy(true);setMessage("");
     const response=await fetch(API+"/incentives/templates/windtre-march-2026",{method:"POST"});const result=await response.json();
@@ -323,6 +329,20 @@ function IncentiveCompetitions(){
     const response=await fetch(`${API}/incentives/${selected.id}/sync-windtre`,{method:"POST"});const result=await response.json();setBusy(false);
     setMessage(response.ok?`Acquisite ${result.added} attivazioni. ${result.skipped_without_activation_date} utenze senza data sono state ignorate.`:(result.detail||"Acquisizione non riuscita"));
     if(response.ok)loadReport(selected.id);
+  }
+  async function previewPdc(file:File|null){
+    if(!file||!selected)return;setPdcFile(file);setPdcPreview(null);setMessage("");setBusy(true);
+    const body=new FormData();body.append("file",file);
+    const response=await fetch(`${API}/incentives/${selected.id}/pdc/preview`,{method:"POST",body});const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"PDC non riconosciuta");return}
+    setPdcPreview(result);setIncludeMobile(!!result.classification?.new_mobile_activation);
+  }
+  async function importPdc(){
+    if(!pdcFile||!selected)return;setBusy(true);setMessage("");
+    const body=new FormData();body.append("file",pdcFile);body.append("seller_name",pdcSeller);body.append("include_mobile",String(includeMobile));
+    const response=await fetch(`${API}/incentives/${selected.id}/pdc/import`,{method:"POST",body});const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"Importazione PDC non riuscita");return}
+    setPdcPreview(null);setPdcFile(null);setPdcSeller("");setMessage(`PDC importata: cliente ${result.customer_name}, ${result.entries_created} quote gara generate.`);loadReport(selected.id);loadPdcHistory(selected.id);
   }
   async function addActivation(event:React.FormEvent){
     event.preventDefault();setBusy(true);setMessage("");
@@ -354,10 +374,19 @@ function IncentiveCompetitions(){
           <div className="commissionTotal"><span>Commissioning stimato</span><strong>{formatCurrency(report?.commissioning_total||0)}</strong><small>{report?.valid_events||0} eventi validi su {report?.total_events||0}</small></div>
           <div className="trackProgress">{report?.tracks?.map((track:any)=><article key={track.track}><div><b>{track.label}</b><span>{track.reached}</span></div><strong>{track.points}</strong><small>punti · {track.remaining?`${track.remaining} alla prossima soglia`:"soglia massima"}</small><progress max={track.next_target||Math.max(track.points,1)} value={track.points}/><em>{formatCurrency(track.commission)}</em></article>)}</div>
           <div className="reportButtons"><a className="exportbtn excel" href={`${API}/incentives/${selected.id}/report.xlsx`}><FileSpreadsheet/>Report Excel</a><a className="exportbtn pdf" href={`${API}/incentives/${selected.id}/report.pdf`} target="_blank"><FileText/>Report PDF</a></div>
+          <label className="pdcUpload"><UploadCloud/><div><b>Importa attivazione da PDC</b><small>Carica il PDF, controlla i dati e conferma le quote gara.</small></div><input type="file" accept=".pdf,application/pdf" onChange={e=>previewPdc(e.target.files?.[0]||null)}/></label>
         </section>
       </div>}
+      {pdcPreview&&<section className="pdcPreview">
+        <div className="sectiontitle"><div><FileText/><h2>Anteprima PDC · {pdcPreview.file_name}</h2></div><button className="icon" onClick={()=>{setPdcPreview(null);setPdcFile(null)}}><XCircle/></button></div>
+        <div className="pdcSummary"><article><span>Cliente</span><b>{pdcPreview.customer.business_name}</b><small>{pdcPreview.customer.fiscal_code}</small></article><article><span>Contratto</span><b>{pdcPreview.contract.contract_code}</b><small>Codice cliente {pdcPreview.contract.customer_code}</small></article><article><span>Linea</span><b>{pdcPreview.contract.phone}</b><small>ICCID {pdcPreview.contract.iccid}</small></article><article><span>Data</span><b>{formatDate(pdcPreview.contract.activation_date)}</b><small>Dealer {pdcPreview.contract.dealer_code}</small></article><article><span>Terminale</span><b>{pdcPreview.device.model}</b><small>IMEI {pdcPreview.device.imei} · {formatCurrency(pdcPreview.device.price)}</small></article><article><span>Pagamento</span><b>{pdcPreview.contract.payment_method}</b><small>{pdcPreview.device.installments} rate da {formatCurrency(pdcPreview.device.installment_amount)}</small></article></div>
+        <div className="pdcQuota"><h3>Quote gara proposte</h3>{pdcPreview.proposed_entries.map((entry:any,index:number)=><article key={index}><CircleDollarSign/><div><b>{entry.label}</b><small>{entry.track} · {entry.offer}</small></div><strong>{formatCurrency(entry.direct_bonus)}</strong></article>)}</div>
+        {pdcPreview.warnings?.length>0&&<div className="pdcWarnings">{pdcPreview.warnings.map((warning:string)=><span key={warning}><AlertTriangle/>{warning}</span>)}</div>}
+        <div className="pdcConfirm"><label>Venditore<input value={pdcSeller} placeholder="Nome venditore" onChange={e=>setPdcSeller(e.target.value)}/></label><label className="mobileVerify"><input type="checkbox" checked={includeMobile} onChange={e=>setIncludeMobile(e.target.checked)}/><span><b>Conteggia anche come nuova attivazione Mobile</b><small>Attivare solo dopo verifica: questa PDC espone Wind Basic e non un canone mobile remunerabile.</small></span></label><button className="new" disabled={busy||pdcPreview.duplicate} onClick={importPdc}>{busy?"Importazione…":pdcPreview.duplicate?"PDC già importata":"Conferma importazione"}</button></div>
+      </section>}
       {message&&<div className="notice ok"><CheckCircle2/>{message}</div>}
       {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}
+      {pdcHistory.length>0&&<section className="pdcHistory"><div className="sectiontitle"><div><History/><h2>PDC importate</h2></div><span>{pdcHistory.length} documenti</span></div>{pdcHistory.map(item=><article key={item.id}><FileText/><div><b>{item.customer_name}</b><small>{item.file_name} · {new Date(item.imported_at).toLocaleString("it-IT")}</small></div><span>{item.activation_ids.length} quote</span><a className="secondary" href={API.replace(/\/api\/v1$/,"")+item.report_url} target="_blank"><Printer/>Report attivazione</a></article>)}</section>}
     </>}
     {showActivation&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setShowActivation(false)}}><form className="drawer activationForm" onSubmit={addActivation}><button type="button" className="close" onClick={()=>setShowActivation(false)}>×</button><small>CONTEGGIO GARA</small><h2>Nuova attivazione</h2><div className="fieldgrid"><label>Data attivazione<input type="date" required value={activation.activation_date} onChange={e=>setActivation({...activation,activation_date:e.target.value})}/></label><label>Pista<select value={activation.track} onChange={e=>setActivation({...activation,track:e.target.value})}>{tracks.map(([code,config]:any)=><option value={code} key={code}>{config.label}</option>)}</select></label><label>Numero / identificativo<input value={activation.asset_number} onChange={e=>setActivation({...activation,asset_number:e.target.value})}/></label><label>Offerta<input value={activation.offer} onChange={e=>setActivation({...activation,offer:e.target.value})}/></label><label>Canone mensile (€)<input type="number" step=".01" value={activation.monthly_fee} onChange={e=>setActivation({...activation,monthly_fee:Number(e.target.value)})}/></label><label>Gettone diretto (€)<input type="number" step=".01" value={activation.direct_bonus} onChange={e=>setActivation({...activation,direct_bonus:Number(e.target.value)})}/></label><label>Venditore<input value={activation.seller_name} onChange={e=>setActivation({...activation,seller_name:e.target.value})}/></label></div><h3>Caratteristiche che modificano punteggio e compenso</h3><div className="attributeChecks">{Object.entries({mnp:"MNP",tied:"Tied / Easy Pay",piva:"Partita IVA",convergent:"Convergente",ftth:"FTTH",fwa:"FWA",very_mobile:"Very Mobile",secure_option:"Più Sicuri",phone_included:"Telefono Incluso",premium_tied_offer:"Offerta Tied premium"}).map(([key,label])=><label key={key}><input type="checkbox" checked={!!activation.attributes[key]} onChange={e=>setActivation({...activation,attributes:{...activation.attributes,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="formactions"><button className="new" disabled={busy}>Salva e conteggia</button></div></form></div>}
   </main>

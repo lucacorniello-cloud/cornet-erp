@@ -2,7 +2,7 @@ import React, {useEffect, useMemo, useState} from "react";
 import ReactDOM from "react-dom/client";
 import {
   AlertTriangle, BriefcaseBusiness, CheckCircle2,
-  CircleDollarSign, FileClock, FileSpreadsheet, History, LayoutDashboard, LogOut,
+  CircleDollarSign, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LogOut,
   Search, Settings, Smartphone, Store, UploadCloud, Users, Wifi, XCircle, Zap
 } from "lucide-react";
 import "./style.css";
@@ -166,6 +166,10 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
         <div className="spendfact"><span>Spesa mensile complessiva</span><b>{formatCurrency(item.monthly_spend)}</b></div>
       </div>
       <div className="sectiontitle"><div><FileSpreadsheet/><h2>Utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
+      <div className="exportactions">
+        <a className="exportbtn excel" href={`${API}/customers/${item.id}/services-pivot.xlsx`}><FileSpreadsheet/>Esporta Excel</a>
+        <a className="exportbtn pdf" href={`${API}/customers/${item.id}/services-pivot.pdf`}><FileText/>Esporta PDF</a>
+      </div>
       {item.assets?.length?<div className="assetlist">{item.assets.map((asset:any)=><article className="assetcard" key={asset.asset_key}>
         <div className="assethead"><div className="asseticon"><BriefcaseBusiness/></div><div><small>{asset.asset_type||"UTENZA WINDTRE"}</small><h3>{asset.asset_number||asset.asset_key}</h3></div><Status value={asset.status==="ACTIVE"?"ACTIVE":item.portfolio_status}/></div>
         <div className="assetdata"><div><span>Piano / offerta</span><b>{asset.plan||"Non indicato"}</b></div><div><span>Canone</span><b>{asset.monthly_fee?formatCurrency(asset.monthly_fee):"—"}</b></div><div><span>Data attivazione</span><b>{formatDate(asset.activation_date)}</b></div><div><span>Stato DB Tool</span><b>{asset.status||"—"}</b></div></div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO
@@ -13,11 +14,20 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from jose import jwt
 from openpyxl import load_workbook
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
@@ -396,6 +406,55 @@ def classify_asset(row: WindTreImportRow) -> str:
             return "MOBILE_M2M"
         return "MOBILE_OTHER"
     return "OTHER"
+
+
+def is_active_service(row: WindTreImportRow) -> bool:
+    status = normalize_header(row.current_status or "")
+    return not status or status in {"ATT", "ACTIVE", "ATTIVO", "ATTIVA"}
+
+
+def customer_service_pivot(rows: list[WindTreImportRow]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, float | int]] = defaultdict(lambda: {"count": 0, "mrr": 0.0})
+    for row in rows:
+        if not is_active_service(row):
+            continue
+        plan = clean(row.current_plan) or "Piano non indicato"
+        grouped[plan]["count"] = int(grouped[plan]["count"]) + 1
+        grouped[plan]["mrr"] = round(float(grouped[plan]["mrr"]) + parse_monthly_fee(row.monthly_fee), 2)
+    return [
+        {"plan": plan, "count": values["count"], "mrr": values["mrr"]}
+        for plan, values in sorted(grouped.items(), key=lambda item: item[0].casefold())
+    ]
+
+
+def safe_export_name(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
+    return normalized[:80] or "cliente"
+
+
+def italian_currency(value: float) -> str:
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " EUR"
+
+
+def latest_customer_snapshot(db, customer_id: uuid.UUID):
+    latest_import = db.scalar(
+        select(WindTreImport)
+        .order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc())
+        .limit(1)
+    )
+    rows = (
+        db.scalars(
+            select(WindTreImportRow)
+            .where(
+                WindTreImportRow.customer_id == customer_id,
+                WindTreImportRow.import_id == latest_import.id,
+            )
+            .order_by(WindTreImportRow.row_number)
+        ).all()
+        if latest_import
+        else []
+    )
+    return latest_import, rows
 
 
 def find_header(sheet) -> tuple[int, list[str]]:
@@ -824,6 +883,134 @@ def customer_detail(customer_id: uuid.UUID):
                 for row in latest_rows[-100:]
             ],
         }
+
+
+@app.get("/api/v1/customers/{customer_id}/services-pivot.xlsx")
+def customer_services_excel(customer_id: uuid.UUID):
+    with SessionLocal() as db:
+        customer = db.get(Customer, customer_id)
+        if not customer:
+            raise HTTPException(404, "Cliente non trovato")
+        latest_import, rows = latest_customer_snapshot(db, customer_id)
+        pivot = customer_service_pivot(rows)
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Servizi attivi"
+        sheet.merge_cells("A1:C1")
+        sheet["A1"] = f"Servizi attivi - {customer.business_name}"
+        sheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
+        sheet["A1"].fill = PatternFill("solid", fgColor="1B2035")
+        sheet["A1"].alignment = Alignment(horizontal="left")
+        sheet["A2"] = "Mese fotografia"
+        sheet["B2"] = latest_import.competence_month if latest_import else "N/D"
+        sheet.append([])
+        sheet.append(["Piano Tariffario", "Utenze Attive", "Ricavo Mensile (MRR)"])
+        header_row = sheet.max_row
+        for cell in sheet[header_row]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="287A51")
+        for item in pivot:
+            sheet.append([item["plan"], item["count"], item["mrr"]])
+            sheet.cell(sheet.max_row, 3).number_format = '€ #,##0.00'
+        total_count = sum(int(item["count"]) for item in pivot)
+        total_mrr = round(sum(float(item["mrr"]) for item in pivot), 2)
+        sheet.append(["TOTALE GENERALE", total_count, total_mrr])
+        for cell in sheet[sheet.max_row]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill("solid", fgColor="E8F3EC")
+        sheet.cell(sheet.max_row, 3).number_format = '€ #,##0.00'
+        sheet.column_dimensions["A"].width = 42
+        sheet.column_dimensions["B"].width = 18
+        sheet.column_dimensions["C"].width = 24
+        sheet.freeze_panes = f"A{header_row + 1}"
+        sheet.auto_filter.ref = f"A{header_row}:C{sheet.max_row - 1}"
+
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        filename = f"servizi_attivi_{safe_export_name(customer.business_name)}.xlsx"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+
+@app.get("/api/v1/customers/{customer_id}/services-pivot.pdf")
+def customer_services_pdf(customer_id: uuid.UUID):
+    with SessionLocal() as db:
+        customer = db.get(Customer, customer_id)
+        if not customer:
+            raise HTTPException(404, "Cliente non trovato")
+        latest_import, rows = latest_customer_snapshot(db, customer_id)
+        pivot = customer_service_pivot(rows)
+        total_count = sum(int(item["count"]) for item in pivot)
+        total_mrr = round(sum(float(item["mrr"]) for item in pivot), 2)
+
+        output = BytesIO()
+        document = SimpleDocTemplate(
+            output,
+            pagesize=A4,
+            rightMargin=18 * mm,
+            leftMargin=18 * mm,
+            topMargin=18 * mm,
+            bottomMargin=18 * mm,
+            title=f"Servizi attivi - {customer.business_name}",
+        )
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "CornetTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=18,
+            leading=22,
+            alignment=TA_LEFT,
+            textColor=colors.HexColor("#1B2035"),
+            spaceAfter=6,
+        )
+        story = [
+            Paragraph("Servizi attivi", title_style),
+            Paragraph(customer.business_name, styles["Heading2"]),
+            Paragraph(
+                f"Fotografia portafoglio: {latest_import.competence_month if latest_import else 'N/D'}",
+                styles["BodyText"],
+            ),
+            Spacer(1, 8 * mm),
+        ]
+        data = [["Piano Tariffario", "Utenze Attive", "Ricavo Mensile (MRR)"]]
+        data.extend(
+            [[item["plan"], str(item["count"]), italian_currency(float(item["mrr"]))] for item in pivot]
+        )
+        data.append(["TOTALE GENERALE", str(total_count), italian_currency(total_mrr)])
+        table = Table(data, colWidths=[91 * mm, 32 * mm, 51 * mm], repeatRows=1)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#287A51")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3EC")),
+                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#C9CED8")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+        story.append(table)
+        document.build(story)
+        output.seek(0)
+        filename = f"servizi_attivi_{safe_export_name(customer.business_name)}.pdf"
+        return StreamingResponse(
+            output,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
 
 @app.get("/api/v1/windtre-imports")

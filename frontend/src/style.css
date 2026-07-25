@@ -101,6 +101,11 @@
 .sectiontitle{display:flex;align-items:center;margin:28px 0 12px}
 .sectiontitle>div{display:flex;align-items:center;gap:9px}
 .sectiontitle h2{font-size:20px;margin:0}
+.exportactions{display:flex;gap:9px;flex-wrap:wrap;margin:-4px 0 14px}
+.exportbtn{display:inline-flex;align-items:center;gap:7px;border-radius:9px;padding:9px 12px;text-decoration:none;font-size:12px;font-weight:750;border:1px solid}
+.exportbtn svg{width:16px;height:16px}
+.exportbtn.excel{color:#20744a;background:#edf8f1;border-color:#c7e9d3}
+.exportbtn.pdf{color:#b43a3a;background:#fff2f2;border-color:#f1cccc}
 .linkbtn{border:0;background:#f0edff;color:#5f50de;border-radius:8px;padding:7px 10px;font-weight:700}
 .empty{min-height:190px;display:grid;place-items:center;align-content:center;text-align:center;color:#9098a8;gap:6px}
 .empty svg{width:35px;height:35px;color:#b1a8ff}

@@ -8,6 +8,7 @@ from app.main import (
     asset_details,
     build_preview,
     classify_asset,
+    customer_service_pivot,
     find_activation_date,
     parse_monthly_fee,
     parse_workbook,
@@ -160,6 +161,47 @@ class WindTreParserTests(unittest.TestCase):
         self.assertEqual(classify_asset(row(3, "MARKETPLACE", "ACCESSO")), "ICT")
         self.assertEqual(classify_asset(row(4, "VOIP", "LINEA")), "FIXED_DATA")
         self.assertEqual(classify_asset(row(5, "FONIA FISSA", "LINEA")), "FIXED_DATA")
+
+    def test_builds_active_services_pivot(self):
+        rows = [
+            WindTreImportRow(
+                row_number=1,
+                customer_key="C1",
+                asset_key="A1",
+                business_name="Cliente",
+                current_plan="SUPER Unlimited",
+                current_status="ATT",
+                monthly_fee="16,99",
+                raw_data={},
+                campaigns={},
+            ),
+            WindTreImportRow(
+                row_number=2,
+                customer_key="C1",
+                asset_key="A2",
+                business_name="Cliente",
+                current_plan="SUPER Unlimited",
+                current_status="ATT",
+                monthly_fee="16,99",
+                raw_data={},
+                campaigns={},
+            ),
+            WindTreImportRow(
+                row_number=3,
+                customer_key="C1",
+                asset_key="A3",
+                business_name="Cliente",
+                current_plan="Servizio sospeso",
+                current_status="SUS",
+                monthly_fee="10",
+                raw_data={},
+                campaigns={},
+            ),
+        ]
+        self.assertEqual(
+            customer_service_pivot(rows),
+            [{"plan": "SUPER Unlimited", "count": 2, "mrr": 33.98}],
+        )
 
 
 if __name__ == "__main__":

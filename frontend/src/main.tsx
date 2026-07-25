@@ -3,8 +3,8 @@ import ReactDOM from "react-dom/client";
 import {
   AlertTriangle, BarChart3, Boxes, BriefcaseBusiness, CheckCircle2, ChevronDown, ChevronRight,
   CircleDollarSign, Copy, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LogOut,
-  Mail, MessageCircle, Package, Plus, Search, Settings, ShoppingCart, Smartphone, Store,
-  Trash2, UploadCloud, Users, Wifi, XCircle, Zap
+  Mail, MessageCircle, Package, Pencil, Plus, Printer, Search, Settings, ShoppingCart, Smartphone, Store,
+  Trash2, Truck, UploadCloud, Users, Wifi, XCircle, Zap
 } from "lucide-react";
 import "./style.css";
 
@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"products"|"orders"|"inventory"|"simreport"|"settings";
+type Page="dashboard"|"customers"|"imports"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -71,6 +71,8 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="orders"} icon={<ShoppingCart/>} onClick={()=>setPage("orders")}>Ordini SIM</Nav>
         <Nav active={page==="inventory"} icon={<Boxes/>} onClick={()=>openInventory()}>Magazzino SIM</Nav>
         <Nav active={page==="simreport"} icon={<BarChart3/>} onClick={()=>setPage("simreport")}>Report SIM</Nav>
+        <div className="navgroup">SPEDIZIONI</div>
+        <Nav active={page==="ddt"} icon={<Truck/>} onClick={()=>setPage("ddt")}>Spedizioni e DDT</Nav>
         <Nav active={page==="settings"} icon={<Settings/>} onClick={()=>setPage("settings")}>Configurazione</Nav>
       </nav>
       <div className="navfoot"><span>VERSIONE</span><b>0.2 · WINDTRE SME</b></div>
@@ -84,6 +86,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="orders"&&<SimOrders/>}
       {page==="inventory"&&<SimInventory initialFilter={inventoryFilter}/>}
       {page==="simreport"&&<SimReport openInventory={openInventory}/>}
+      {page==="ddt"&&<DdtShipments/>}
       {page==="settings"&&<StoreConfiguration value={store} saved={setStore}/>}
     </section>
   </div>;
@@ -384,6 +387,73 @@ function ImportDetail({item,close}:{item:any;close:()=>void}){
   return <div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)close()}}><section className="drawer"><button className="close" onClick={close}>×</button><small>ESTRAZIONE {item.competence_month}</small><h2>{item.file_name}</h2><div className="miniKpis"><b>{item.customer_count}<span>Clienti</span></b><b>{item.new_customers}<span>Nuovi</span></b><b>{item.missing_customers}<span>Assenti</span></b><b>{item.campaign_changes}<span>Campagne</span></b></div>{grouped.length?grouped.map(([name,changes]:any)=><div className="changegroup" key={name}><h3>{changeLabel(name)} <span>{changes.length}</span></h3>{changes.slice(0,100).map((c:any)=><div className="change" key={c.id}><div><b>{c.customer_key}</b><small>{c.asset_key||"Cliente"}</small></div><div><strong>{c.field_name||changeLabel(c.change_type)}</strong><small>{c.old_value||"—"} → {c.new_value||"—"}</small></div></div>)}</div>):<Empty icon={<CheckCircle2/>} text="Prima fotografia acquisita: nessun mese precedente da confrontare"/>}</section></div>;
 }
 
+const DDT_STATUSES=[
+  ["IN_PREPARAZIONE","In preparazione"],
+  ["SPEDITO","Spedito"],
+  ["CONSEGNATO","Consegnato"],
+  ["ANNULLATO","Annullato"],
+] as const;
+const EMPTY_DDT={document_date:new Date().toISOString().slice(0,10),customer_id:"",recipient_name:"",recipient_address:"",goods_description:"",carrier:"",tracking_number:"",status:"IN_PREPARAZIONE"};
+
+function DdtShipments(){
+  const [data,setData]=useState<any>({items:[],counts:{}});
+  const [customers,setCustomers]=useState<any[]>([]);
+  const [search,setSearch]=useState("");
+  const [status,setStatus]=useState("");
+  const [form,setForm]=useState<any>(EMPTY_DDT);
+  const [editing,setEditing]=useState<any>(null);
+  const [open,setOpen]=useState(false);
+  const [message,setMessage]=useState("");
+  async function load(){
+    const params=new URLSearchParams();if(search)params.set("search",search);if(status)params.set("status",status);
+    const response=await fetch(API+"/ddt?"+params);setData(await response.json());
+  }
+  useEffect(()=>{const timer=setTimeout(load,180);return()=>clearTimeout(timer)},[search,status]);
+  useEffect(()=>{fetch(API+"/customers?limit=500").then(r=>r.json()).then(r=>setCustomers(r.items||r||[]))},[]);
+  function chooseCustomer(id:string){
+    const customer=customers.find(item=>item.id===id);
+    setForm({...form,customer_id:id,recipient_name:customer?.business_name||"",recipient_address:customer?.address||""});
+  }
+  function startNew(){setEditing(null);setForm({...EMPTY_DDT,document_date:new Date().toISOString().slice(0,10)});setMessage("");setOpen(true)}
+  function startEdit(item:any){setEditing(item);setForm({...item});setMessage("");setOpen(true)}
+  async function save(event:React.FormEvent){
+    event.preventDefault();setMessage("");
+    const url=editing?API+"/ddt/"+editing.id:API+"/ddt";
+    const response=await fetch(url,{method:editing?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...form,customer_id:form.customer_id||null})});
+    const result=await response.json();if(!response.ok){setMessage(result.detail||"Salvataggio non riuscito");return}
+    setOpen(false);await load();
+  }
+  async function changeStatus(item:any,next:string){
+    let tracking=item.tracking_number||"";
+    if(next==="SPEDITO"&&!tracking){tracking=prompt("Inserisci il codice tracking")||"";if(!tracking)return}
+    if(next==="ANNULLATO"&&!confirm("Confermi l'annullamento del DDT? Rimarrà nello storico."))return;
+    const response=await fetch(API+"/ddt/"+item.id+"/status",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:next,tracking_number:tracking})});
+    if(!response.ok){const result=await response.json();alert(result.detail||"Aggiornamento non riuscito")}else load();
+  }
+  async function remove(item:any){
+    if(!confirm("Eliminare definitivamente questo DDT in preparazione?"))return;
+    const response=await fetch(API+"/ddt/"+item.id,{method:"DELETE"});
+    if(!response.ok){const result=await response.json();alert(result.detail||"Eliminazione non riuscita")}else load();
+  }
+  function printPdf(item:any){window.open(API+"/ddt/"+item.id+"/pdf","_blank","noopener,noreferrer")}
+  return <main className="page">
+    <div className="title"><div><small>LOGISTICA E DOCUMENTI</small><h1>Spedizioni e DDT</h1><p>Crea, traccia e stampa i documenti di trasporto con numerazione automatica.</p></div><button className="new" onClick={startNew}><Plus/>Nuovo DDT</button></div>
+    <div className="cards ddtKpis">{DDT_STATUSES.map(([key,label])=><Card key={key} label={label} value={data.counts?.[key]||0}/>)}</div>
+    <div className="toolbar"><label className="searchbox"><Search/><input placeholder="Numero, cliente, corriere, tracking o contenuto…" value={search} onChange={e=>setSearch(e.target.value)}/></label><select value={status} onChange={e=>setStatus(e.target.value)}><option value="">Tutti gli stati</option>{DDT_STATUSES.map(([key,label])=><option value={key} key={key}>{label}</option>)}</select></div>
+    <div className="ddtList">{data.items?.length?data.items.map((item:any)=><article className="ddtCard" key={item.id}>
+      <div className="ddtHead"><div><small>{formatDate(item.document_date)}</small><h2>{item.ddt_number}</h2></div><span className={"ddtBadge "+item.status.toLowerCase()}>{DDT_STATUSES.find(([key])=>key===item.status)?.[1]||item.status}</span></div>
+      <div className="ddtBody"><div><b>{item.recipient_name}</b><span>{item.recipient_address}</span></div><div><b>{item.carrier||"Vettore da definire"}</b><span>{item.tracking_number||"Tracking non presente"}</span></div><p>{item.goods_description}</p></div>
+      <div className="ddtActions"><button className="secondary" onClick={()=>printPdf(item)}><Printer/>Stampa PDF</button>{item.status!=="ANNULLATO"&&<select value={item.status} onChange={e=>changeStatus(item,e.target.value)}>{DDT_STATUSES.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select>}{item.status!=="ANNULLATO"&&<button className="icon" title="Modifica" onClick={()=>startEdit(item)}><Pencil/></button>}{item.status==="IN_PREPARAZIONE"&&<button className="icon danger" title="Elimina" onClick={()=>remove(item)}><Trash2/></button>}</div>
+    </article>):<Empty icon={<Truck/>} text="Nessun documento di trasporto"/>}</div>
+    {open&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setOpen(false)}}><form className="drawer ddtForm" onSubmit={save}><button type="button" className="close" onClick={()=>setOpen(false)}>×</button><small>{editing?"MODIFICA DOCUMENTO":"NUOVO DOCUMENTO"}</small><h2>{editing?editing.ddt_number:"Crea DDT"}</h2>
+      <div className="fieldgrid"><label>Data documento<input type="date" value={form.document_date} onChange={e=>setForm({...form,document_date:e.target.value})}/></label><label>Cliente CRM<select value={form.customer_id||""} onChange={e=>chooseCustomer(e.target.value)}><option value="">Destinatario esterno</option>{customers.map(item=><option value={item.id} key={item.id}>{item.business_name}</option>)}</select></label><label>Destinatario<input required value={form.recipient_name} onChange={e=>setForm({...form,recipient_name:e.target.value})}/></label><label>Indirizzo di consegna<input required value={form.recipient_address} onChange={e=>setForm({...form,recipient_address:e.target.value})}/></label><label>Vettore / Corriere<input placeholder="DHL, BRT, GLS, consegna diretta…" value={form.carrier||""} onChange={e=>setForm({...form,carrier:e.target.value})}/></label><label>Codice tracking<input value={form.tracking_number||""} onChange={e=>setForm({...form,tracking_number:e.target.value})}/></label></div>
+      <label>Descrizione beni, seriali, matricole o SIM<textarea required rows={10} placeholder={"N. 2 SIM WindTre Business\nICCID: 8939…"} value={form.goods_description} onChange={e=>setForm({...form,goods_description:e.target.value})}/></label>
+      <label>Stato<select value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>{DDT_STATUSES.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
+      {message&&<div className="notice error"><XCircle/>{message}</div>}<div className="formactions"><button className="new">{editing?"Salva modifiche":"Genera DDT"}</button></div>
+    </form></div>}
+  </main>
+}
+
 const STORE_FIELDS=[
   ["store_name","Nome punto vendita","Cornet Solutions"],
   ["legal_name","Ragione sociale","Ragione sociale completa"],
@@ -413,19 +483,19 @@ function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
       setForm(result);saved(result);setMessage({kind:"ok",text:"Configurazione del punto vendita salvata."});
     }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
   }
-  async function uploadLogo(file:File|null){
+  async function uploadLogo(file:File|null,partner=false){
     if(!file)return;setBusy(true);setMessage(null);
     const data=new FormData();data.append("file",file);
     try{
-      const response=await fetch(API+"/settings/store/logo",{method:"POST",body:data});
+      const response=await fetch(API+"/settings/store/"+(partner?"partner-logo":"logo"),{method:"POST",body:data});
       const result=await response.json();if(!response.ok)throw new Error(result.detail||"Logo non caricato");
-      setForm(result);saved(result);setMessage({kind:"ok",text:"Logo aggiornato correttamente."});
+      setForm(result);saved(result);setMessage({kind:"ok",text:partner?"Logo partner aggiornato correttamente.":"Logo aggiornato correttamente."});
     }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
   }
   return <main className="page">
     <div className="title"><div><small>IMPOSTAZIONI AZIENDALI</small><h1>Configurazione punto vendita</h1><p>Questi dati saranno utilizzati per documenti, preventivi, DDT e comunicazioni.</p></div></div>
     <div className="settingsgrid">
-      <article className="logocard"><div className="logopreview">{form.logo_url?<img src={assetUrl(form.logo_url)} alt="Logo punto vendita"/>:<Store/>}</div><h2>Logo del negozio</h2><p>PNG, JPG o WEBP, massimo 5 MB.</p><label className="secondary uploadbutton">Scegli logo<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null)}/></label></article>
+      <div className="logoStack"><article className="logocard"><div className="logopreview">{form.logo_url?<img src={assetUrl(form.logo_url)} alt="Logo punto vendita"/>:<Store/>}</div><h2>Logo del mittente</h2><p>Appare a sinistra nei DDT.</p><label className="secondary uploadbutton">Scegli logo<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null)}/></label></article><article className="logocard"><div className="logopreview">{form.partner_logo_url?<img src={assetUrl(form.partner_logo_url)} alt="Logo partner"/>:<BriefcaseBusiness/>}</div><h2>Logo partner</h2><p>WindTre o altro brand, a destra nei DDT.</p><label className="secondary uploadbutton">Scegli logo partner<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null,true)}/></label></article></div>
       <form className="settingsform" onSubmit={submit}>
         <div className="formsection"><h2>Dati del punto vendita</h2><div className="fieldgrid">{STORE_FIELDS.map(([key,label,placeholder])=><label key={key}>{label}<input value={form[key]||""} placeholder={placeholder} onChange={event=>setForm({...form,[key]:event.target.value})} required={key==="store_name"}/></label>)}</div></div>
         {message&&<div className={"notice "+message.kind}>{message.kind==="ok"?<CheckCircle2/>:<XCircle/>}{message.text}</div>}

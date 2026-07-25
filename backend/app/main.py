@@ -328,6 +328,22 @@ def asset_details(raw_data: dict[str, Any] | None) -> list[dict[str, str]]:
 
 def classify_asset(row: WindTreImportRow) -> str:
     raw = row.raw_data or {}
+    sim_type = normalize_header(raw.get("TIPOLOGIA_SIM"))
+    sim_class = normalize_header(raw.get("CLASSE_SIM"))
+
+    if sim_type == "FONIA_MOBILE":
+        if sim_class == "FONIA":
+            return "MOBILE_VOICE"
+        if sim_class == "DATI":
+            return "MOBILE_DATA"
+        if sim_class == "M2M":
+            return "MOBILE_M2M"
+        return "MOBILE_OTHER"
+    if sim_type == "MARKETPLACE":
+        return "ICT"
+    if sim_type in {"VOIP", "ADSL", "FONIA_FISSA", "DATI"}:
+        return "FIXED_DATA"
+
     asset_text = normalize_header(
         " ".join(
             clean(value)
@@ -372,7 +388,13 @@ def classify_asset(row: WindTreImportRow) -> str:
         or any(token in asset_text for token in ("MOBILE", "SIM", "MSISDN"))
         or clean(raw.get("MSISDN"))
     ):
-        return "MOBILE"
+        if sim_class == "FONIA":
+            return "MOBILE_VOICE"
+        if sim_class == "DATI":
+            return "MOBILE_DATA"
+        if sim_class == "M2M":
+            return "MOBILE_M2M"
+        return "MOBILE_OTHER"
     return "OTHER"
 
 
@@ -660,8 +682,12 @@ def portfolio_summary(segment: str = "BUSINESS_SME"):
             else []
         )
         totals = {
-            "MOBILE": {"count": 0, "mrr": 0.0},
+            "MOBILE_VOICE": {"count": 0, "mrr": 0.0},
+            "MOBILE_DATA": {"count": 0, "mrr": 0.0},
+            "MOBILE_M2M": {"count": 0, "mrr": 0.0},
+            "MOBILE_OTHER": {"count": 0, "mrr": 0.0},
             "FIXED_DATA": {"count": 0, "mrr": 0.0},
+            "ICT": {"count": 0, "mrr": 0.0},
             "OTHER": {"count": 0, "mrr": 0.0},
         }
         for row in rows:
@@ -671,12 +697,24 @@ def portfolio_summary(segment: str = "BUSINESS_SME"):
                 totals[category]["mrr"] + parse_monthly_fee(row.monthly_fee),
                 2,
             )
+        mobile_categories = ("MOBILE_VOICE", "MOBILE_DATA", "MOBILE_M2M", "MOBILE_OTHER")
+        mobile = {
+            "count": sum(totals[key]["count"] for key in mobile_categories),
+            "mrr": round(sum(totals[key]["mrr"] for key in mobile_categories), 2),
+            "breakdown": {
+                "voice": totals["MOBILE_VOICE"],
+                "data": totals["MOBILE_DATA"],
+                "m2m": totals["MOBILE_M2M"],
+                "other": totals["MOBILE_OTHER"],
+            },
+        }
         return {
             "segment": segment,
             "competence_month": latest_import.competence_month if latest_import else None,
             "customers": customer_count,
-            "mobile": totals["MOBILE"],
+            "mobile": mobile,
             "fixed_data": totals["FIXED_DATA"],
+            "ict": totals["ICT"],
             "other_services": totals["OTHER"],
             "total_mrr": round(sum(item["mrr"] for item in totals.values()), 2),
         }

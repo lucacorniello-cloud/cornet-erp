@@ -98,9 +98,22 @@ function Dashboard({openImports}:{openImports:()=>void}){
     <div className="status"><span></span><div><b>{last?"Ultima estrazione acquisita":"Pronto per la prima estrazione"}</b><p>{last?`${monthLabel(last.competence_month)} · ${last.customer_count} clienti · ${last.row_count} righe`:"Carica il file Excel mensile del DB Tool WINDTRE"}</p></div></div>
     <div className="portfolioKpis">
       <PortfolioCard tone="blue" icon={<Users/>} label="Clienti selezionati" value={portfolio?.customers??0}/>
-      <PortfolioCard tone="green" icon={<Smartphone/>} label="Mobile" value={portfolio?.mobile?.count??0} amount={portfolio?.mobile?.mrr}/>
+      <PortfolioCard
+        tone="green"
+        icon={<Smartphone/>}
+        label="Mobile"
+        value={portfolio?.mobile?.count??0}
+        amount={portfolio?.mobile?.mrr}
+        details={[
+          ["Fonia",portfolio?.mobile?.breakdown?.voice?.count??0],
+          ["Dati",portfolio?.mobile?.breakdown?.data?.count??0],
+          ["M2M",portfolio?.mobile?.breakdown?.m2m?.count??0],
+          ["Altro",portfolio?.mobile?.breakdown?.other?.count??0],
+        ]}
+      />
       <PortfolioCard tone="purple" icon={<Wifi/>} label="Fisso / Dati" value={portfolio?.fixed_data?.count??0} amount={portfolio?.fixed_data?.mrr}/>
-      <PortfolioCard tone="cyan" icon={<Zap/>} label="Altri servizi" value={portfolio?.other_services?.count??0} amount={portfolio?.other_services?.mrr}/>
+      <PortfolioCard tone="cyan" icon={<BriefcaseBusiness/>} label="ICT / Marketplace" value={portfolio?.ict?.count??0} amount={portfolio?.ict?.mrr}/>
+      <PortfolioCard tone="blue" icon={<Zap/>} label="Altri servizi" value={portfolio?.other_services?.count??0} amount={portfolio?.other_services?.mrr}/>
       <PortfolioCard tone="gold" icon={<CircleDollarSign/>} label="Totale Canone (MRR)" value={formatCurrency(portfolio?.total_mrr??0)}/>
     </div>
     <div className="grid">
@@ -115,8 +128,8 @@ function Dashboard({openImports}:{openImports:()=>void}){
   </main>;
 }
 
-function PortfolioCard({label,value,amount,icon,tone}:{label:string;value:any;amount?:number;icon:React.ReactNode;tone:string}){
-  return <article className={"portfolioCard "+tone}><div><span>{label}</span><div className="portfolioValue"><strong>{value}</strong>{amount!==undefined&&<b>{formatCurrency(amount)}</b>}</div></div><div className="portfolioIcon">{icon}</div></article>
+function PortfolioCard({label,value,amount,icon,tone,details}:{label:string;value:any;amount?:number;icon:React.ReactNode;tone:string;details?:Array<[string,number]>}){
+  return <article className={"portfolioCard "+tone}><div><span>{label}</span><div className="portfolioValue"><strong>{value}</strong>{amount!==undefined&&<b>{formatCurrency(amount)}</b>}</div>{details&&<div className="portfolioBreakdown">{details.map(([name,count])=><small key={name}>{name} <b>{count}</b></small>)}</div>}</div><div className="portfolioIcon">{icon}</div></article>
 }
 
 function Customers(){

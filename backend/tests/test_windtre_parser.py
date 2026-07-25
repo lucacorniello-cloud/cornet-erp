@@ -109,7 +109,12 @@ class WindTreParserTests(unittest.TestCase):
             customer_key="C1",
             asset_key="A1",
             business_name="Cliente",
-            raw_data={"MSISDN": "3931111111", "CANONE_SIM": "10"},
+            raw_data={
+                "MSISDN": "3931111111",
+                "CANONE_SIM": "10",
+                "TIPOLOGIA_SIM": "FONIA MOBILE",
+                "CLASSE_SIM": "FONIA",
+            },
             campaigns={},
         )
         fixed = WindTreImportRow(
@@ -118,7 +123,12 @@ class WindTreParserTests(unittest.TestCase):
             asset_key="A2",
             business_name="Cliente",
             # Nel DB Tool anche una linea fissa può avere MSISDN.
-            raw_data={"MSISDN": "0299999999", "CANONE_ACCESSO": "25"},
+            raw_data={
+                "MSISDN": "0299999999",
+                "CANONE_ACCESSO": "25",
+                "TIPOLOGIA_SIM": "ADSL",
+                "CLASSE_SIM": "ACCESSO",
+            },
             campaigns={},
         )
         other = WindTreImportRow(
@@ -130,9 +140,26 @@ class WindTreParserTests(unittest.TestCase):
             raw_data={"DES_PRODOTTO_MKP": "Microsoft 365"},
             campaigns={},
         )
-        self.assertEqual(classify_asset(mobile), "MOBILE")
+        self.assertEqual(classify_asset(mobile), "MOBILE_VOICE")
         self.assertEqual(classify_asset(fixed), "FIXED_DATA")
         self.assertEqual(classify_asset(other), "OTHER")
+
+    def test_classifies_mobile_subcategories_and_marketplace(self):
+        def row(number, sim_type, sim_class):
+            return WindTreImportRow(
+                row_number=number,
+                customer_key="C1",
+                asset_key=f"A{number}",
+                business_name="Cliente",
+                raw_data={"TIPOLOGIA_SIM": sim_type, "CLASSE_SIM": sim_class},
+                campaigns={},
+            )
+
+        self.assertEqual(classify_asset(row(1, "FONIA MOBILE", "DATI")), "MOBILE_DATA")
+        self.assertEqual(classify_asset(row(2, "FONIA MOBILE", "M2M")), "MOBILE_M2M")
+        self.assertEqual(classify_asset(row(3, "MARKETPLACE", "ACCESSO")), "ICT")
+        self.assertEqual(classify_asset(row(4, "VOIP", "LINEA")), "FIXED_DATA")
+        self.assertEqual(classify_asset(row(5, "FONIA FISSA", "LINEA")), "FIXED_DATA")
 
 
 if __name__ == "__main__":

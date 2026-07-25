@@ -42,13 +42,16 @@
 .segmenttabs{display:flex;gap:7px;margin-top:22px;overflow:auto;padding-bottom:2px}
 .segmenttabs button{border:1px solid #dfe3eb;background:#fff;color:#697286;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:750;white-space:nowrap}
 .segmenttabs button.active{background:#1b2035;color:#fff;border-color:#1b2035;box-shadow:0 5px 14px #1b203524}
-.portfolioKpis{display:grid;grid-template-columns:1fr 1.15fr 1.15fr 1.15fr 1.35fr;gap:14px}
+.portfolioKpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 .portfolioCard{min-height:128px;border-radius:17px;padding:21px 18px;background:#17191f;color:#f7f7fa;border:1px solid #2c2f37;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 9px 28px #17191f12}
 .portfolioCard>div:first-child{min-width:0}
 .portfolioCard span{display:block;color:#aaaab3;font-weight:750;font-size:13px;margin-bottom:12px}
 .portfolioValue{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
 .portfolioValue strong{font-size:29px;letter-spacing:-.7px;white-space:nowrap}
 .portfolioValue b{font-size:14px;white-space:nowrap}
+.portfolioBreakdown{display:flex;gap:6px;flex-wrap:wrap;margin-top:13px}
+.portfolioBreakdown small{color:#c6c8d0;background:#24272f;border-radius:999px;padding:5px 8px;font-size:11px;white-space:nowrap}
+.portfolioBreakdown small b{color:#fff;margin-left:3px}
 .portfolioIcon{width:49px;height:49px;border-radius:12px;display:grid;place-items:center;flex:none}
 .portfolioIcon svg{width:24px}
 .portfolioCard.blue .portfolioIcon{color:#59a2ff;background:#142844}.portfolioCard.blue .portfolioValue b{color:#59a2ff}

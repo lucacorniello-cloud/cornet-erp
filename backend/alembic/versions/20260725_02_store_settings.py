@@ -5,6 +5,7 @@ Revises: 20260725_01
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 revision = "20260725_02"
@@ -14,6 +15,11 @@ depends_on = None
 
 
 def upgrade():
+    # Alcune installazioni Alpha hanno creato questa tabella tramite
+    # SQLAlchemy create_all prima dell'introduzione di Alembic. In quel caso
+    # la struttura è già corretta e la migrazione deve limitarsi ad avanzare.
+    if inspect(op.get_bind()).has_table("store_settings"):
+        return
     op.create_table(
         "store_settings",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -36,4 +42,5 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_table("store_settings")
+    if inspect(op.get_bind()).has_table("store_settings"):
+        op.drop_table("store_settings")

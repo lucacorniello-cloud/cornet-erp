@@ -172,8 +172,6 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def seed():
-    # Conservato per compatibilità con il database Milestone 0.
-    Base.metadata.create_all(engine)
     with SessionLocal() as db:
         if not db.scalar(select(User).where(User.email == "admin@cornet.local")):
             db.add(

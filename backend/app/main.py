@@ -759,7 +759,7 @@ PRODUCT_COLUMN_ALIASES = {
     "unit_cost": {"COSTO", "COSTO_UNITARIO", "PREZZO_ACQUISTO"},
 }
 SIM_COLUMN_ALIASES = {
-    "iccid": {"ICCID", "SERIALE", "SERIALE_SIM"},
+    "iccid": {"ICCID", "SERIALE", "SERIALE_SIM", "SERIALE_ICCID"},
     "sku": {"CODICE", "CODICE_ARTICOLO", "SKU", "ARTICOLO"},
     "status": {"STATO", "STATO_SIM"},
     "order_number": {"ORDINE", "ID_ORDINE", "NUMERO_ORDINE"},

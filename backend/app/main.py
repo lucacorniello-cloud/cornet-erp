@@ -343,6 +343,24 @@ class DdtShipment(Base):
     sims: Mapped[list[SimInventory]] = relationship(secondary="ddt_shipment_sims")
 
 
+class WindTrePanelRequest(Base):
+    __tablename__ = "windtre_panel_requests"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    customer_name: Mapped[str] = mapped_column(String(255), index=True)
+    template_key: Mapped[str] = mapped_column(String(80), index=True)
+    template_title: Mapped[str] = mapped_column(String(255))
+    recipient: Mapped[str | None] = mapped_column(String(255))
+    subject: Mapped[str] = mapped_column(String(500))
+    body: Mapped[str] = mapped_column(Text)
+    form_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    response_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="ATTESA", index=True)
+    operator_uid: Mapped[str] = mapped_column(String(255), default="local-user")
+    customer: Mapped[Customer | None] = relationship()
+
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -447,6 +465,21 @@ class TerminalCBRequest(BaseModel):
     upfront: float = 0
     monthly_installment: float = 0
     final_installment: float = 0
+
+
+class WindTrePanelRequestCreate(BaseModel):
+    customer_id: uuid.UUID | None = None
+    customer_name: str
+    template_key: str
+    recipient: str | None = None
+    subject: str
+    body: str
+    form_data: dict[str, Any] = {}
+    operator_uid: str = "local-user"
+
+
+class WindTrePanelResponseUpdate(BaseModel):
+    response_date: date | None = None
 
 
 class ProductRequest(BaseModel):
@@ -1572,6 +1605,98 @@ def reset_terminals_cb():
         return {"created": len(DEFAULT_CB)*4}
 
 
+WINDTRE_PANEL_TEMPLATES = [
+    {"key": "DOCUMENTI", "title": "Richiesta Documenti", "recipient": "", "category": "CLIENTE"},
+    {"key": "DISDETTA_1928", "title": "Disdetta Business SME (1928)", "recipient": "CustomerCareWindTreBusiness@pec.windtre.it", "category": "PEC"},
+    {"key": "CESSAZIONE_159", "title": "Cessazione Consumer/Micro (159)", "recipient": "servizioclienti159@pec.windtre.it", "category": "PEC"},
+    {"key": "SOSTITUZIONE_SIM", "title": "Sostituzione SIM (Furto / Smarrimento)", "recipient": "CustomerCareWindTreBusiness@pec.windtre.it", "category": "PEC"},
+    {"key": "CAMBIO_AGENZIA", "title": "Richiesta Cambio Agenzia", "recipient": "lucacorniello@partner.windtre.it", "category": "PARTNER"},
+    {"key": "BUSINESS_CONSUMER", "title": "Passaggio Business -> Consumer", "recipient": "lucacorniello@partner.windtre.it", "category": "PARTNER", "printable": True},
+    {"key": "SPEDIZIONE_TERMINALI", "title": "Autorizzazione Spedizione Terminali", "recipient": "lucacorniello@partner.windtre.it", "category": "PARTNER"},
+    {"key": "SUBENTRO", "title": "Richiesta Subentro", "recipient": "", "category": "CLIENTE"},
+    {"key": "BENVENUTO", "title": "Benvenuto & Conferma", "recipient": "", "category": "CLIENTE"},
+    {"key": "SOLLECITO", "title": "Sollecito Pratica", "recipient": "", "category": "CLIENTE"},
+]
+WINDTRE_PANEL_TEMPLATE_MAP = {item["key"]: item for item in WINDTRE_PANEL_TEMPLATES}
+WINDTRE_PANEL_TAX_REQUIRED = {"DOCUMENTI", "DISDETTA_1928", "CESSAZIONE_159", "SOSTITUZIONE_SIM", "CAMBIO_AGENZIA", "BUSINESS_CONSUMER", "SPEDIZIONE_TERMINALI"}
+
+
+def serialize_windtre_panel_request(item: WindTrePanelRequest) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "customer_id": str(item.customer_id) if item.customer_id else None,
+        "customer_name": item.customer_name, "template_key": item.template_key,
+        "template_title": item.template_title, "recipient": item.recipient or "",
+        "subject": item.subject, "body": item.body, "form_data": item.form_data or {},
+        "sent_at": item.sent_at.isoformat(), "response_date": item.response_date.isoformat() if item.response_date else None,
+        "status": item.status, "operator_uid": item.operator_uid,
+    }
+
+
+@app.get("/api/v1/windtre-panel/templates")
+def windtre_panel_templates():
+    return WINDTRE_PANEL_TEMPLATES
+
+
+@app.get("/api/v1/windtre-panel/requests")
+def windtre_panel_requests(search: str = "", status: str | None = None, limit: int = Query(50, ge=1, le=200)):
+    with SessionLocal() as db:
+        query = select(WindTrePanelRequest).order_by(WindTrePanelRequest.sent_at.desc()).limit(limit)
+        if search.strip():
+            query = query.where(WindTrePanelRequest.customer_name.ilike(f"%{search.strip()}%"))
+        if status:
+            query = query.where(WindTrePanelRequest.status == status)
+        return [serialize_windtre_panel_request(item) for item in db.scalars(query).all()]
+
+
+@app.post("/api/v1/windtre-panel/requests")
+def create_windtre_panel_request(data: WindTrePanelRequestCreate):
+    template = WINDTRE_PANEL_TEMPLATE_MAP.get(data.template_key)
+    if not template:
+        raise HTTPException(422, "Template WindTre non valido")
+    if not data.customer_name.strip() or not data.subject.strip() or not data.body.strip():
+        raise HTTPException(422, "Cliente, oggetto e corpo della comunicazione sono obbligatori")
+    tax_id = re.sub(r"\D", "", str(data.form_data.get("tax_id") or ""))
+    if data.template_key in WINDTRE_PANEL_TAX_REQUIRED and len(tax_id) != 11:
+        raise HTTPException(422, "La Partita IVA deve contenere esattamente 11 cifre")
+    if data.template_key == "DOCUMENTI":
+        phone = re.sub(r"\D", "", str(data.form_data.get("otp_phone") or ""))
+        if len(phone) not in {9, 10}:
+            raise HTTPException(422, "Il telefono per OTP deve contenere 9 o 10 cifre")
+    with SessionLocal() as db:
+        if data.customer_id and not db.get(Customer, data.customer_id):
+            raise HTTPException(404, "Cliente non trovato")
+        item = WindTrePanelRequest(
+            customer_id=data.customer_id, customer_name=data.customer_name.strip(),
+            template_key=data.template_key, template_title=template["title"],
+            recipient=(data.recipient or "").strip() or None, subject=data.subject.strip(),
+            body=data.body, form_data=data.form_data, operator_uid=data.operator_uid or "local-user",
+        )
+        db.add(item); db.commit(); db.refresh(item)
+        return serialize_windtre_panel_request(item)
+
+
+@app.patch("/api/v1/windtre-panel/requests/{request_id}")
+def update_windtre_panel_request(request_id: uuid.UUID, data: WindTrePanelResponseUpdate):
+    with SessionLocal() as db:
+        item = db.get(WindTrePanelRequest, request_id)
+        if not item:
+            raise HTTPException(404, "Pratica non trovata")
+        item.response_date = data.response_date
+        item.status = "GESTITA" if data.response_date else "ATTESA"
+        db.commit(); db.refresh(item)
+        return serialize_windtre_panel_request(item)
+
+
+@app.delete("/api/v1/windtre-panel/requests/{request_id}")
+def delete_windtre_panel_request(request_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(WindTrePanelRequest, request_id)
+        if not item:
+            raise HTTPException(404, "Pratica non trovata")
+        db.delete(item); db.commit()
+        return {"ok": True}
+
+
 TARIFF_PLAN_TYPES = {"VOCE", "DATI", "FISSO", "DATI_M2M"}
 
 
@@ -2642,6 +2767,9 @@ def customer_detail(customer_id: uuid.UUID):
             "tax_id": customer.tax_id,
             "fiscal_code": customer.fiscal_code,
             "windtre_customer_code": customer.windtre_customer_code,
+            "email": customer.email,
+            "phone": customer.phone,
+            "address": customer.address,
             "portfolio_status": customer.portfolio_status,
             "first_seen_month": customer.first_seen_month,
             "last_seen_month": customer.last_seen_month,

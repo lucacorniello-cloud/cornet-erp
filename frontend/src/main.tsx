@@ -393,11 +393,12 @@ const DDT_STATUSES=[
   ["CONSEGNATO","Consegnato"],
   ["ANNULLATO","Annullato"],
 ] as const;
-const EMPTY_DDT={document_date:new Date().toISOString().slice(0,10),customer_id:"",recipient_name:"",recipient_address:"",goods_description:"",carrier:"",tracking_number:"",status:"IN_PREPARAZIONE"};
+const EMPTY_DDT={document_date:new Date().toISOString().slice(0,10),customer_id:"",recipient_name:"",recipient_address:"",goods_description:"",carrier:"",tracking_number:"",status:"IN_PREPARAZIONE",sim_ids:[] as string[]};
 
 function DdtShipments(){
   const [data,setData]=useState<any>({items:[],counts:{}});
   const [customers,setCustomers]=useState<any[]>([]);
+  const [customerSims,setCustomerSims]=useState<any[]>([]);
   const [search,setSearch]=useState("");
   const [status,setStatus]=useState("");
   const [form,setForm]=useState<any>(EMPTY_DDT);
@@ -410,12 +411,18 @@ function DdtShipments(){
   }
   useEffect(()=>{const timer=setTimeout(load,180);return()=>clearTimeout(timer)},[search,status]);
   useEffect(()=>{fetch(API+"/customers?limit=500").then(r=>r.json()).then(r=>setCustomers(r.items||r||[]))},[]);
+  async function loadCustomerSims(id:string){
+    if(!id){setCustomerSims([]);return}
+    const response=await fetch(API+"/sim-inventory?customer_id="+id+"&limit=2000");setCustomerSims(await response.json());
+  }
   function chooseCustomer(id:string){
     const customer=customers.find(item=>item.id===id);
-    setForm({...form,customer_id:id,recipient_name:customer?.business_name||"",recipient_address:customer?.address||""});
+    setForm({...form,customer_id:id,recipient_name:customer?.business_name||"",recipient_address:customer?.address||"",sim_ids:[]});
+    loadCustomerSims(id);
   }
-  function startNew(){setEditing(null);setForm({...EMPTY_DDT,document_date:new Date().toISOString().slice(0,10)});setMessage("");setOpen(true)}
-  function startEdit(item:any){setEditing(item);setForm({...item});setMessage("");setOpen(true)}
+  function startNew(){setEditing(null);setCustomerSims([]);setForm({...EMPTY_DDT,document_date:new Date().toISOString().slice(0,10),sim_ids:[]});setMessage("");setOpen(true)}
+  function startEdit(item:any){setEditing(item);setForm({...item,sim_ids:item.sim_ids||[]});setMessage("");setOpen(true);loadCustomerSims(item.customer_id)}
+  function toggleSim(id:string){setForm({...form,sim_ids:(form.sim_ids||[]).includes(id)?form.sim_ids.filter((value:string)=>value!==id):[...(form.sim_ids||[]),id]})}
   async function save(event:React.FormEvent){
     event.preventDefault();setMessage("");
     const url=editing?API+"/ddt/"+editing.id:API+"/ddt";
@@ -442,12 +449,13 @@ function DdtShipments(){
     <div className="toolbar"><label className="searchbox"><Search/><input placeholder="Numero, cliente, corriere, tracking o contenuto…" value={search} onChange={e=>setSearch(e.target.value)}/></label><select value={status} onChange={e=>setStatus(e.target.value)}><option value="">Tutti gli stati</option>{DDT_STATUSES.map(([key,label])=><option value={key} key={key}>{label}</option>)}</select></div>
     <div className="ddtList">{data.items?.length?data.items.map((item:any)=><article className="ddtCard" key={item.id}>
       <div className="ddtHead"><div><small>{formatDate(item.document_date)}</small><h2>{item.ddt_number}</h2></div><span className={"ddtBadge "+item.status.toLowerCase()}>{DDT_STATUSES.find(([key])=>key===item.status)?.[1]||item.status}</span></div>
-      <div className="ddtBody"><div><b>{item.recipient_name}</b><span>{item.recipient_address}</span></div><div><b>{item.carrier||"Vettore da definire"}</b><span>{item.tracking_number||"Tracking non presente"}</span></div><p>{item.goods_description}</p></div>
+      <div className="ddtBody"><div><b>{item.recipient_name}</b><span>{item.recipient_address}</span></div><div><b>{item.carrier||"Vettore da definire"}</b><span>{item.tracking_number||"Tracking non presente"}</span></div><p>{item.goods_description}{item.sims?.length?`\n${item.sims.length} SIM selezionate per la spedizione`:""}</p></div>
       <div className="ddtActions"><button className="secondary" onClick={()=>printPdf(item)}><Printer/>Stampa PDF</button>{item.status!=="ANNULLATO"&&<select value={item.status} onChange={e=>changeStatus(item,e.target.value)}>{DDT_STATUSES.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select>}{item.status!=="ANNULLATO"&&<button className="icon" title="Modifica" onClick={()=>startEdit(item)}><Pencil/></button>}{item.status==="IN_PREPARAZIONE"&&<button className="icon danger" title="Elimina" onClick={()=>remove(item)}><Trash2/></button>}</div>
     </article>):<Empty icon={<Truck/>} text="Nessun documento di trasporto"/>}</div>
     {open&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setOpen(false)}}><form className="drawer ddtForm" onSubmit={save}><button type="button" className="close" onClick={()=>setOpen(false)}>×</button><small>{editing?"MODIFICA DOCUMENTO":"NUOVO DOCUMENTO"}</small><h2>{editing?editing.ddt_number:"Crea DDT"}</h2>
       <div className="fieldgrid"><label>Data documento<input type="date" value={form.document_date} onChange={e=>setForm({...form,document_date:e.target.value})}/></label><label>Cliente CRM<select value={form.customer_id||""} onChange={e=>chooseCustomer(e.target.value)}><option value="">Destinatario esterno</option>{customers.map(item=><option value={item.id} key={item.id}>{item.business_name}</option>)}</select></label><label>Destinatario<input required value={form.recipient_name} onChange={e=>setForm({...form,recipient_name:e.target.value})}/></label><label>Indirizzo di consegna<input required value={form.recipient_address} onChange={e=>setForm({...form,recipient_address:e.target.value})}/></label><label>Vettore / Corriere<input placeholder="DHL, BRT, GLS, consegna diretta…" value={form.carrier||""} onChange={e=>setForm({...form,carrier:e.target.value})}/></label><label>Codice tracking<input value={form.tracking_number||""} onChange={e=>setForm({...form,tracking_number:e.target.value})}/></label></div>
-      <label>Descrizione beni, seriali, matricole o SIM<textarea required rows={10} placeholder={"N. 2 SIM WindTre Business\nICCID: 8939…"} value={form.goods_description} onChange={e=>setForm({...form,goods_description:e.target.value})}/></label>
+      {form.customer_id&&<section className="ddtSimPicker"><div><h3>SIM associate al cliente</h3><span>{(form.sim_ids||[]).length} selezionate su {customerSims.length}</span></div>{customerSims.length?<div className="ddtSimList">{customerSims.map(sim=><label className={(form.sim_ids||[]).includes(sim.id)?"selected":""} key={sim.id}><input type="checkbox" checked={(form.sim_ids||[]).includes(sim.id)} onChange={()=>toggleSim(sim.id)}/><div><b>{sim.product_name}</b><code>{sim.iccid}</code></div><div><span>{sim.msisdn||"Numero non assegnato"}</span><small>{sim.status.replaceAll("_"," ")}</small></div></label>)}</div>:<p className="muted">Non risultano SIM di magazzino associate a questo cliente.</p>}</section>}
+      <label>Descrizione aggiuntiva dei beni<textarea required={!(form.sim_ids||[]).length} rows={7} placeholder={(form.sim_ids||[]).length?"Le SIM selezionate saranno inserite automaticamente nel DDT. Aggiungi qui eventuali note o altri beni.":"N. 2 SIM WindTre Business\nICCID: 8939…"} value={form.goods_description} onChange={e=>setForm({...form,goods_description:e.target.value})}/></label>
       <label>Stato<select value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>{DDT_STATUSES.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
       {message&&<div className="notice error"><XCircle/>{message}</div>}<div className="formactions"><button className="new">{editing?"Salva modifiche":"Genera DDT"}</button></div>
     </form></div>}

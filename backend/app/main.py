@@ -328,15 +328,51 @@ def asset_details(raw_data: dict[str, Any] | None) -> list[dict[str, str]]:
 
 def classify_asset(row: WindTreImportRow) -> str:
     raw = row.raw_data or {}
-    asset_type = normalize_header(row.asset_type or "")
-    if raw.get("MSISDN") or raw.get("CANONE_SIM") or any(
-        token in asset_type for token in ("MOBILE", "SIM", "MSISDN")
-    ):
-        return "MOBILE"
-    if raw.get("CANONE_LINEA") or raw.get("CANONE_ACCESSO") or any(
-        token in asset_type for token in ("FISSO", "DATI", "FIBRA", "FTTH", "FTTC", "FWA", "ACCESSO")
+    asset_text = normalize_header(
+        " ".join(
+            clean(value)
+            for value in (
+                row.asset_type,
+                row.plan,
+                raw.get("TIPO_ASSET"),
+                raw.get("TIPO_SERVIZIO"),
+                raw.get("CATEGORIA_SERVIZIO"),
+                raw.get("CATEGORIA"),
+                raw.get("TIPO_ACCESSO"),
+                raw.get("DES_TIPO_ACCESSO"),
+                raw.get("DESCRIZIONE_ACCESSO"),
+                raw.get("DES_PRODOTTO"),
+                raw.get("PRODOTTO"),
+            )
+            if clean(value)
+        )
+    )
+    fixed_tokens = (
+        "FISSO",
+        "DATI",
+        "FIBRA",
+        "FTTH",
+        "FTTC",
+        "FWA",
+        "ADSL",
+        "ACCESSO",
+        "OFFICE_PLUS",
+        "SUPER_OFFICE",
+    )
+    # Alcune estrazioni WINDTRE valorizzano MSISDN anche sulle linee fisse:
+    # gli indicatori specifici Fisso/Dati devono quindi avere la precedenza.
+    if (
+        clean(raw.get("CANONE_LINEA"))
+        or clean(raw.get("CANONE_ACCESSO"))
+        or any(token in asset_text for token in fixed_tokens)
     ):
         return "FIXED_DATA"
+    if (
+        clean(raw.get("CANONE_SIM"))
+        or any(token in asset_text for token in ("MOBILE", "SIM", "MSISDN"))
+        or clean(raw.get("MSISDN"))
+    ):
+        return "MOBILE"
     return "OTHER"
 
 

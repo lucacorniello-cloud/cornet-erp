@@ -117,7 +117,8 @@ class WindTreParserTests(unittest.TestCase):
             customer_key="C1",
             asset_key="A2",
             business_name="Cliente",
-            raw_data={"CANONE_ACCESSO": "25"},
+            # Nel DB Tool anche una linea fissa può avere MSISDN.
+            raw_data={"MSISDN": "0299999999", "CANONE_ACCESSO": "25"},
             campaigns={},
         )
         other = WindTreImportRow(

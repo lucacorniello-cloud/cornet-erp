@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
+type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"incentives"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -68,6 +68,7 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
         <Nav active={page==="windtrepanel"} icon={<Mail/>} onClick={()=>setPage("windtrepanel")}>WindTre Pannello</Nav>
         <div className="navgroup">COMMERCIALE</div>
+        <Nav active={page==="incentives"} icon={<CircleDollarSign/>} onClick={()=>setPage("incentives")}>Gare e commissioning</Nav>
         <Nav active={page==="tariffs"} icon={<Tag/>} onClick={()=>setPage("tariffs")}>Piani tariffari</Nav>
         <Nav active={page==="terminals"} icon={<Smartphone/>} onClick={()=>setPage("terminals")}>Terminali GA e CB</Nav>
         <div className="navgroup">SIM E MAGAZZINO</div>
@@ -90,6 +91,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
       {page==="windtrepanel"&&<WindTrePanel/>}
+      {page==="incentives"&&<IncentiveCompetitions/>}
       {page==="tariffs"&&<TariffPlans/>}
       {page==="terminals"&&<TerminalCatalog/>}
       {page==="terminalinventory"&&<TerminalInventory/>}
@@ -274,6 +276,91 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
       {quotes.length?<div className="quoteHistory">{quotes.map(quote=><article key={quote.id}><FileSpreadsheet/><div><b>{quote.file_name}</b><small>{new Date(quote.created_at).toLocaleString("it-IT")} · {quote.line_count} linee</small></div><div><span>MRR attuale <b>{formatCurrency(quote.current_mrr)}</b></span><span>Proposto <b>{formatCurrency(quote.proposed_mrr)}</b></span></div></article>)}</div>:<Empty icon={<History/>} text="Nessun configuratore generato"/>}
     </section>
   </div>
+}
+
+function IncentiveCompetitions(){
+  const [items,setItems]=useState<any[]>([]);
+  const [selected,setSelected]=useState<any>(null);
+  const [report,setReport]=useState<any>(null);
+  const [message,setMessage]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [showActivation,setShowActivation]=useState(false);
+  const emptyActivation={activation_date:"2026-03-01",track:"MOBILE",customer_id:"",seller_name:"",asset_number:"",offer:"",monthly_fee:0,direct_bonus:0,status:"VALID",attributes:{mnp:false,tied:false,piva:false,convergent:false,ftth:false,fwa:false,first_line:true,very_mobile:false,secure_option:false,phone_included:false,premium_tied_offer:false}};
+  const [activation,setActivation]=useState<any>(emptyActivation);
+  const load=async()=>{
+    const list=await fetch(API+"/incentives").then(r=>r.json());setItems(list);
+    if(list.length&&!selected)setSelected(list[0]);
+    else if(selected){const fresh=list.find((item:any)=>item.id===selected.id);if(fresh)setSelected(fresh)}
+  };
+  const loadReport=async(id:string)=>setReport(await fetch(`${API}/incentives/${id}/report`).then(r=>r.json()));
+  useEffect(()=>{load()},[]);
+  useEffect(()=>{if(selected?.id){setReport(null);loadReport(selected.id);setActivation({...emptyActivation,activation_date:selected.start_date})}},[selected?.id]);
+  async function createMarch(){
+    setBusy(true);setMessage("");
+    const response=await fetch(API+"/incentives/templates/windtre-march-2026",{method:"POST"});const result=await response.json();
+    setBusy(false);if(!response.ok){setMessage(result.detail||"Creazione non riuscita");return}await load();setSelected(result);setMessage("Modello Marzo 2026 creato dalla lettera WINDTRE.");
+  }
+  function updateThreshold(track:string,index:number,key:string,value:string){
+    const configuration=structuredClone(selected.configuration);configuration.tracks[track].thresholds[index][key]=Number(value);
+    setSelected({...selected,configuration});
+  }
+  async function saveCompetition(){
+    setBusy(true);setMessage("");
+    const response=await fetch(`${API}/incentives/${selected.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(selected)});
+    const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"Salvataggio non riuscito");return}
+    setSelected(result);setMessage("Configurazione gara salvata.");loadReport(result.id);load();
+  }
+  async function duplicateCompetition(){
+    const name=prompt("Nome della nuova gara",selected.name.replace("Marzo","Aprile"));if(!name)return;
+    const start=prompt("Data iniziale (AAAA-MM-GG)","2026-04-01");if(!start)return;
+    const end=prompt("Data finale (AAAA-MM-GG)","2026-04-30");if(!end)return;
+    const response=await fetch(API+"/incentives",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...selected,id:undefined,name,start_date:start,end_date:end,status:"DRAFT"})});
+    const result=await response.json();if(!response.ok){setMessage(result.detail||"Duplicazione non riuscita");return}await load();setSelected(result);setMessage("Nuova gara creata: puoi modificare soglie e regole.");
+  }
+  async function syncActivations(){
+    setBusy(true);setMessage("");
+    const response=await fetch(`${API}/incentives/${selected.id}/sync-windtre`,{method:"POST"});const result=await response.json();setBusy(false);
+    setMessage(response.ok?`Acquisite ${result.added} attivazioni. ${result.skipped_without_activation_date} utenze senza data sono state ignorate.`:(result.detail||"Acquisizione non riuscita"));
+    if(response.ok)loadReport(selected.id);
+  }
+  async function addActivation(event:React.FormEvent){
+    event.preventDefault();setBusy(true);setMessage("");
+    const response=await fetch(`${API}/incentives/${selected.id}/activations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...activation,customer_id:activation.customer_id||null})});
+    const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"Attivazione non salvata");return}
+    setShowActivation(false);setActivation({...emptyActivation,activation_date:selected.start_date});setMessage("Attivazione aggiunta e conteggiata.");loadReport(selected.id);
+  }
+  async function removeActivation(id:string){
+    if(!confirm("Rimuovere questa attivazione dal conteggio della gara?"))return;
+    await fetch(`${API}/incentives/${selected.id}/activations/${id}`,{method:"DELETE"});loadReport(selected.id);
+  }
+  const tracks=selected?Object.entries(selected.configuration?.tracks||{}):[];
+  return <main className="page incentivePage">
+    <div className="title"><div><small>CONTROLLO REMUNERAZIONI</small><h1>Gare e commissioning</h1><p>Configura le lettere incentivo, conteggia le attivazioni e controlla soglie e compensi.</p></div>{selected&&<div className="titleactions"><button className="secondary" onClick={duplicateCompetition}><Copy/>Duplica gara</button><button className="new" onClick={()=>setShowActivation(true)}><Plus/>Aggiungi attivazione</button></div>}</div>
+    {!items.length?<article className="competitionEmpty"><CircleDollarSign/><h2>Configura la prima gara</h2><p>Il modello riprende soglie e regole principali della lettera WINDTRE di marzo 2026. Potrai duplicarlo per i mesi successivi.</p><button className="new" disabled={busy} onClick={createMarch}>{busy?"Creazione…":"Crea modello Marzo 2026"}</button></article>:<>
+      <div className="competitionSelector"><label>Gara<select value={selected?.id||""} onChange={e=>setSelected(items.find(item=>item.id===e.target.value))}>{items.map(item=><option value={item.id} key={item.id}>{item.name}</option>)}</select></label><Status value={selected?.status==="ACTIVE"?"ACTIVE":"DRAFT"}/><span>{formatDate(selected?.start_date)} - {formatDate(selected?.end_date)}</span></div>
+      {selected&&<div className="competitionLayout">
+        <section className="competitionConfig">
+          <div className="sectiontitle"><div><Settings/><h2>Configurazione gara</h2></div><button className="new" disabled={busy} onClick={saveCompetition}>Salva configurazione</button></div>
+          <div className="fieldgrid"><label>Nome<input value={selected.name} onChange={e=>setSelected({...selected,name:e.target.value})}/></label><label>Codice dealer<input value={selected.dealer_code||""} onChange={e=>setSelected({...selected,dealer_code:e.target.value})}/></label><label>Data iniziale<input type="date" value={selected.start_date} onChange={e=>setSelected({...selected,start_date:e.target.value})}/></label><label>Data finale<input type="date" value={selected.end_date} onChange={e=>setSelected({...selected,end_date:e.target.value})}/></label></div>
+          <div className="trackConfigList">{tracks.map(([track,config]:any)=><article key={track}><div className="trackTitle"><div><b>{config.label}</b><small>{track}</small></div><label>Soglia accesso<input type="number" step=".01" value={config.access_threshold||0} onChange={e=>{const configuration=structuredClone(selected.configuration);configuration.tracks[track].access_threshold=Number(e.target.value);setSelected({...selected,configuration})}}/></label></div>
+            {config.thresholds?.length>0&&<div className="thresholdEditor">{config.thresholds.map((threshold:any,index:number)=><div key={index}><input value={threshold.label} readOnly/><label>Target<input type="number" step=".01" value={threshold.target} onChange={e=>updateThreshold(track,index,"target",e.target.value)}/></label>{track==="MOBILE"&&<><label>Mult. MNP<input type="number" step=".01" value={threshold.mnp_multiplier} onChange={e=>updateThreshold(track,index,"mnp_multiplier",e.target.value)}/></label><label>Mult. NO MNP<input type="number" step=".01" value={threshold.no_mnp_multiplier} onChange={e=>updateThreshold(track,index,"no_mnp_multiplier",e.target.value)}/></label></>}{track==="FIXED"&&<><label>Mult. convergente<input type="number" step=".01" value={threshold.convergent_multiplier} onChange={e=>updateThreshold(track,index,"convergent_multiplier",e.target.value)}/></label><label>Mult. standard<input type="number" step=".01" value={threshold.standard_multiplier} onChange={e=>updateThreshold(track,index,"standard_multiplier",e.target.value)}/></label></>}{track==="RELOAD"&&<label>Moltiplicatore<input type="number" step=".01" value={threshold.bonus_multiplier} onChange={e=>updateThreshold(track,index,"bonus_multiplier",e.target.value)}/></label>}</div>)}</div>}
+            <div className="ruleChips">{config.rules?.map((rule:any)=><span key={rule.code}><b>{rule.code}</b>{rule.label}</span>)}</div>
+          </article>)}</div>
+        </section>
+        <section className="competitionResults">
+          <div className="sectiontitle"><div><BarChart3/><h2>Avanzamento</h2></div><button className="secondary" disabled={busy} onClick={syncActivations}><Download/>Acquisisci attivazioni</button></div>
+          <div className="commissionTotal"><span>Commissioning stimato</span><strong>{formatCurrency(report?.commissioning_total||0)}</strong><small>{report?.valid_events||0} eventi validi su {report?.total_events||0}</small></div>
+          <div className="trackProgress">{report?.tracks?.map((track:any)=><article key={track.track}><div><b>{track.label}</b><span>{track.reached}</span></div><strong>{track.points}</strong><small>punti · {track.remaining?`${track.remaining} alla prossima soglia`:"soglia massima"}</small><progress max={track.next_target||Math.max(track.points,1)} value={track.points}/><em>{formatCurrency(track.commission)}</em></article>)}</div>
+          <div className="reportButtons"><a className="exportbtn excel" href={`${API}/incentives/${selected.id}/report.xlsx`}><FileSpreadsheet/>Report Excel</a><a className="exportbtn pdf" href={`${API}/incentives/${selected.id}/report.pdf`} target="_blank"><FileText/>Report PDF</a></div>
+        </section>
+      </div>}
+      {message&&<div className="notice ok"><CheckCircle2/>{message}</div>}
+      {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}
+    </>}
+    {showActivation&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setShowActivation(false)}}><form className="drawer activationForm" onSubmit={addActivation}><button type="button" className="close" onClick={()=>setShowActivation(false)}>×</button><small>CONTEGGIO GARA</small><h2>Nuova attivazione</h2><div className="fieldgrid"><label>Data attivazione<input type="date" required value={activation.activation_date} onChange={e=>setActivation({...activation,activation_date:e.target.value})}/></label><label>Pista<select value={activation.track} onChange={e=>setActivation({...activation,track:e.target.value})}>{tracks.map(([code,config]:any)=><option value={code} key={code}>{config.label}</option>)}</select></label><label>Numero / identificativo<input value={activation.asset_number} onChange={e=>setActivation({...activation,asset_number:e.target.value})}/></label><label>Offerta<input value={activation.offer} onChange={e=>setActivation({...activation,offer:e.target.value})}/></label><label>Canone mensile (€)<input type="number" step=".01" value={activation.monthly_fee} onChange={e=>setActivation({...activation,monthly_fee:Number(e.target.value)})}/></label><label>Gettone diretto (€)<input type="number" step=".01" value={activation.direct_bonus} onChange={e=>setActivation({...activation,direct_bonus:Number(e.target.value)})}/></label><label>Venditore<input value={activation.seller_name} onChange={e=>setActivation({...activation,seller_name:e.target.value})}/></label></div><h3>Caratteristiche che modificano punteggio e compenso</h3><div className="attributeChecks">{Object.entries({mnp:"MNP",tied:"Tied / Easy Pay",piva:"Partita IVA",convergent:"Convergente",ftth:"FTTH",fwa:"FWA",very_mobile:"Very Mobile",secure_option:"Più Sicuri",phone_included:"Telefono Incluso",premium_tied_offer:"Offerta Tied premium"}).map(([key,label])=><label key={key}><input type="checkbox" checked={!!activation.attributes[key]} onChange={e=>setActivation({...activation,attributes:{...activation.attributes,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="formactions"><button className="new" disabled={busy}>Salva e conteggia</button></div></form></div>}
+  </main>
 }
 
 function Products(){

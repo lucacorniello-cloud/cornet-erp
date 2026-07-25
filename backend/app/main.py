@@ -5,7 +5,7 @@ from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -227,6 +227,38 @@ class SimInventoryImport(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class TariffPlan(Base):
+    __tablename__ = "tariff_plans"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    plan_type: Mapped[str] = mapped_column(String(30), index=True)
+    ga_list_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    cb_list_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    valid_from: Mapped[date | None] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date)
+    subscribable: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    monthly_fee_cents: Mapped[int] = mapped_column(Integer, default=0)
+    secure_web_cents: Mapped[int] = mapped_column(Integer, default=0)
+    activation_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    sim_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    national_gb: Mapped[str | None] = mapped_column(String(100))
+    national_minutes: Mapped[str | None] = mapped_column(String(100))
+    national_sms: Mapped[str | None] = mapped_column(String(100))
+    eu_limited: Mapped[bool] = mapped_column(Boolean, default=False)
+    eu_gb: Mapped[str | None] = mapped_column(String(100))
+    eu_minutes: Mapped[str | None] = mapped_column(String(100))
+    eu_sms: Mapped[str | None] = mapped_column(String(100))
+    eu_international_calls: Mapped[str | None] = mapped_column(Text)
+    roaming_countries: Mapped[str | None] = mapped_column(Text)
+    international_included: Mapped[bool] = mapped_column(Boolean, default=False)
+    international_countries: Mapped[str | None] = mapped_column(Text)
+    custom_discounts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    technical_pdf_path: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class DdtShipmentSim(Base):
     __tablename__ = "ddt_shipment_sims"
     ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
@@ -297,6 +329,32 @@ class DdtShipmentRequest(BaseModel):
 class DdtStatusRequest(BaseModel):
     status: str
     tracking_number: str | None = None
+
+
+class TariffPlanRequest(BaseModel):
+    name: str
+    plan_type: str
+    ga_list_code: str | None = None
+    cb_list_code: str | None = None
+    valid_from: date | None = None
+    valid_to: date | None = None
+    subscribable: bool = True
+    monthly_fee: float = 0
+    secure_web: float = 0
+    activation_cost: float = 0
+    sim_cost: float = 0
+    national_gb: str | None = None
+    national_minutes: str | None = None
+    national_sms: str | None = None
+    eu_limited: bool = False
+    eu_gb: str | None = None
+    eu_minutes: str | None = None
+    eu_sms: str | None = None
+    eu_international_calls: str | None = None
+    roaming_countries: str | None = None
+    international_included: bool = False
+    international_countries: str | None = None
+    custom_discounts: list[dict[str, Any]] = []
 
 
 class ProductRequest(BaseModel):
@@ -1037,6 +1095,227 @@ async def upload_partner_logo(file: UploadFile = File(...)):
             if previous_path.is_file():
                 previous_path.unlink()
         return serialize_store_settings(item)
+
+
+TARIFF_PLAN_TYPES = {"VOCE", "DATI", "FISSO", "DATI_M2M"}
+
+
+def tariff_cents(value: Any) -> int:
+    return max(0, round(parse_monthly_fee(value) * 100))
+
+
+def serialize_tariff_plan(item: TariffPlan) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "plan_code": item.plan_code, "name": item.name, "plan_type": item.plan_type,
+        "ga_list_code": item.ga_list_code or "", "cb_list_code": item.cb_list_code or "",
+        "valid_from": item.valid_from.isoformat() if item.valid_from else None,
+        "valid_to": item.valid_to.isoformat() if item.valid_to else None, "subscribable": item.subscribable,
+        "monthly_fee": item.monthly_fee_cents / 100, "secure_web": item.secure_web_cents / 100,
+        "activation_cost": item.activation_cost_cents / 100, "sim_cost": item.sim_cost_cents / 100,
+        "national_gb": item.national_gb or "", "national_minutes": item.national_minutes or "",
+        "national_sms": item.national_sms or "", "eu_limited": item.eu_limited, "eu_gb": item.eu_gb or "",
+        "eu_minutes": item.eu_minutes or "", "eu_sms": item.eu_sms or "",
+        "eu_international_calls": item.eu_international_calls or "", "roaming_countries": item.roaming_countries or "",
+        "international_included": item.international_included, "international_countries": item.international_countries or "",
+        "custom_discounts": item.custom_discounts or [],
+        "technical_pdf_url": f"/uploads/{item.technical_pdf_path}" if item.technical_pdf_path else None,
+        "total_monthly": (item.monthly_fee_cents + item.secure_web_cents) / 100,
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def apply_tariff_data(item: TariffPlan, data: TariffPlanRequest):
+    if data.plan_type not in TARIFF_PLAN_TYPES:
+        raise HTTPException(422, "Tipologia piano non valida")
+    if not data.name.strip():
+        raise HTTPException(422, "Il nome del piano è obbligatorio")
+    if data.valid_from and data.valid_to and data.valid_to < data.valid_from:
+        raise HTTPException(422, "La data di fine validità precede la data iniziale")
+    text_fields = (
+        "ga_list_code", "cb_list_code", "national_gb", "national_minutes", "national_sms", "eu_gb",
+        "eu_minutes", "eu_sms", "eu_international_calls", "roaming_countries", "international_countries",
+    )
+    item.name, item.plan_type = data.name.strip(), data.plan_type
+    item.valid_from, item.valid_to, item.subscribable = data.valid_from, data.valid_to, data.subscribable
+    item.monthly_fee_cents, item.secure_web_cents = tariff_cents(data.monthly_fee), tariff_cents(data.secure_web)
+    item.activation_cost_cents, item.sim_cost_cents = tariff_cents(data.activation_cost), tariff_cents(data.sim_cost)
+    item.eu_limited, item.international_included = data.eu_limited, data.international_included
+    for field in text_fields:
+        value = getattr(data, field)
+        setattr(item, field, value.strip() if value else None)
+    item.custom_discounts = [
+        {
+            "cod": clean(row.get("cod")), "desc": clean(row.get("desc")),
+            "prz": parse_monthly_fee(row.get("prz")), "sw": parse_monthly_fee(row.get("sw")),
+            "ga": bool(row.get("ga")), "cb": bool(row.get("cb")),
+        }
+        for row in data.custom_discounts if clean(row.get("cod")) or clean(row.get("desc"))
+    ]
+
+
+def next_plan_code(db) -> str:
+    base = int(datetime.now(timezone.utc).timestamp() * 1000)
+    code = f"PT-{base}"
+    while db.scalar(select(TariffPlan.id).where(TariffPlan.plan_code == code)):
+        base += 1
+        code = f"PT-{base}"
+    return code
+
+
+@app.get("/api/v1/tariff-plans")
+def tariff_plans(search: str = "", plan_type: str | None = None, subscribable: bool | None = None):
+    with SessionLocal() as db:
+        query = select(TariffPlan).order_by(TariffPlan.subscribable.desc(), TariffPlan.name)
+        if plan_type:
+            query = query.where(TariffPlan.plan_type == plan_type)
+        if subscribable is not None:
+            query = query.where(TariffPlan.subscribable == subscribable)
+        if search.strip():
+            pattern = f"%{search.strip()}%"
+            query = query.where(or_(TariffPlan.name.ilike(pattern), TariffPlan.ga_list_code.ilike(pattern), TariffPlan.cb_list_code.ilike(pattern), TariffPlan.plan_code.ilike(pattern)))
+        return [serialize_tariff_plan(item) for item in db.scalars(query).all()]
+
+
+@app.post("/api/v1/tariff-plans")
+def create_tariff_plan(data: TariffPlanRequest):
+    with SessionLocal() as db:
+        if db.scalar(select(TariffPlan).where(func.lower(TariffPlan.name) == data.name.strip().lower())):
+            raise HTTPException(409, "Esiste già un piano con questo nome")
+        item = TariffPlan(plan_code=next_plan_code(db), name=data.name.strip(), plan_type=data.plan_type)
+        apply_tariff_data(item, data)
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_tariff_plan(item)
+
+
+@app.put("/api/v1/tariff-plans/{plan_id}")
+def update_tariff_plan(plan_id: uuid.UUID, data: TariffPlanRequest):
+    with SessionLocal() as db:
+        item = db.get(TariffPlan, plan_id)
+        if not item:
+            raise HTTPException(404, "Piano non trovato")
+        duplicate = db.scalar(select(TariffPlan).where(func.lower(TariffPlan.name) == data.name.strip().lower(), TariffPlan.id != plan_id))
+        if duplicate:
+            raise HTTPException(409, "Esiste già un piano con questo nome")
+        apply_tariff_data(item, data)
+        db.commit()
+        db.refresh(item)
+        return serialize_tariff_plan(item)
+
+
+@app.delete("/api/v1/tariff-plans/{plan_id}")
+def delete_tariff_plan(plan_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(TariffPlan, plan_id)
+        if not item:
+            raise HTTPException(404, "Piano non trovato")
+        attachment = UPLOAD_DIR / item.technical_pdf_path if item.technical_pdf_path else None
+        db.delete(item)
+        db.commit()
+        if attachment and attachment.is_file():
+            attachment.unlink()
+        return {"ok": True}
+
+
+@app.post("/api/v1/tariff-plans/{plan_id}/pdf")
+async def upload_tariff_pdf(plan_id: uuid.UUID, file: UploadFile = File(...)):
+    if file.content_type != "application/pdf" and not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(422, "Carica una scheda tecnica PDF")
+    contents = await file.read()
+    if len(contents) > 15 * 1024 * 1024:
+        raise HTTPException(413, "Il PDF supera il limite di 15 MB")
+    filename = f"tariff-plan-{plan_id}.pdf"
+    (UPLOAD_DIR / filename).write_bytes(contents)
+    with SessionLocal() as db:
+        item = db.get(TariffPlan, plan_id)
+        if not item:
+            raise HTTPException(404, "Piano non trovato")
+        item.technical_pdf_path = filename
+        db.commit()
+        db.refresh(item)
+        return serialize_tariff_plan(item)
+
+
+@app.get("/api/v1/tariff-plans/{plan_id}/share")
+def share_tariff_plan(plan_id: uuid.UUID, discount_code: str | None = None):
+    with SessionLocal() as db:
+        item = db.get(TariffPlan, plan_id)
+        if not item:
+            raise HTTPException(404, "Piano non trovato")
+        scenario = next((row for row in item.custom_discounts or [] if row.get("cod") == discount_code), None)
+        monthly = float(scenario.get("prz", 0)) if scenario else item.monthly_fee_cents / 100
+        secure = float(scenario.get("sw", 0)) if scenario else item.secure_web_cents / 100
+        text = "\n".join(filter(None, [
+            f"📱 *{item.name}*", f"Tipologia: {item.plan_type.replace('_', ' ')}",
+            f"💶 Canone: € {monthly:.2f}/mese", f"🛡️ Secure Web: € {secure:.2f}/mese" if secure else None,
+            f"*Totale mensile: € {monthly + secure:.2f}*",
+            f"🌐 Giga: {item.national_gb}" if item.national_gb else None,
+            f"📞 Minuti: {item.national_minutes}" if item.national_minutes else None,
+            f"💬 SMS: {item.national_sms}" if item.national_sms else None,
+            f"🎁 Promozione: {scenario.get('desc')}" if scenario else None,
+        ]))
+        return {"subject": f"Proposta {item.name}", "text": text, "total_monthly": monthly + secure}
+
+
+@app.get("/api/v1/tariff-plans-export.csv")
+def export_tariff_plans():
+    with SessionLocal() as db:
+        items = db.scalars(select(TariffPlan).order_by(TariffPlan.name)).all()
+        output = StringIO()
+        fields = ["nome_piano","tipologia","listino_ga","listino_cb","data_inizio","data_fine","sottoscrivibile","canone_mensile","secure_web_base","costo_attivazione","costo_sim","gb_naz","min_naz","sms_naz","limitazioni_ue","gb_ue","min_ue","sms_ue","int_da_ue","paesi_roaming","flag_int","paesi_int","sconti_custom"]
+        writer = csv.DictWriter(output, fieldnames=fields, delimiter=";")
+        writer.writeheader()
+        for item in items:
+            value = serialize_tariff_plan(item)
+            writer.writerow({
+                "nome_piano": value["name"], "tipologia": value["plan_type"], "listino_ga": value["ga_list_code"], "listino_cb": value["cb_list_code"],
+                "data_inizio": value["valid_from"] or "", "data_fine": value["valid_to"] or "", "sottoscrivibile": str(value["subscribable"]).lower(),
+                "canone_mensile": value["monthly_fee"], "secure_web_base": value["secure_web"], "costo_attivazione": value["activation_cost"], "costo_sim": value["sim_cost"],
+                "gb_naz": value["national_gb"], "min_naz": value["national_minutes"], "sms_naz": value["national_sms"], "limitazioni_ue": str(value["eu_limited"]).lower(),
+                "gb_ue": value["eu_gb"], "min_ue": value["eu_minutes"], "sms_ue": value["eu_sms"], "int_da_ue": value["eu_international_calls"],
+                "paesi_roaming": value["roaming_countries"], "flag_int": str(value["international_included"]).lower(), "paesi_int": value["international_countries"],
+                "sconti_custom": json.dumps(value["custom_discounts"], ensure_ascii=False),
+            })
+        payload = ("\ufeff" + output.getvalue()).encode("utf-8")
+        return StreamingResponse(BytesIO(payload), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="piani_tariffari.csv"'})
+
+
+@app.post("/api/v1/tariff-plans-import")
+async def import_tariff_plans(file: UploadFile = File(...)):
+    rows = parse_uploaded_table(file.filename or "", await file.read())
+    imported, skipped, errors = 0, 0, []
+    with SessionLocal() as db:
+        existing = {item.name.casefold() for item in db.scalars(select(TariffPlan)).all()}
+        for index, row in enumerate(rows, 2):
+            try:
+                name = row.get("NOME_PIANO", "").strip()
+                if not name or name.casefold() in existing:
+                    skipped += 1
+                    continue
+                discounts = json.loads(row.get("SCONTI_CUSTOM", "[]") or "[]")
+                data = TariffPlanRequest(
+                    name=name, plan_type=row.get("TIPOLOGIA", "VOCE"), ga_list_code=row.get("LISTINO_GA"),
+                    cb_list_code=row.get("LISTINO_CB"), valid_from=row.get("DATA_INIZIO") or None, valid_to=row.get("DATA_FINE") or None,
+                    subscribable=normalize_header(row.get("SOTTOSCRIVIBILE", "TRUE")) in {"TRUE","SI","1","Y"},
+                    monthly_fee=parse_monthly_fee(row.get("CANONE_MENSILE")), secure_web=parse_monthly_fee(row.get("SECURE_WEB_BASE")),
+                    activation_cost=parse_monthly_fee(row.get("COSTO_ATTIVAZIONE")), sim_cost=parse_monthly_fee(row.get("COSTO_SIM")),
+                    national_gb=row.get("GB_NAZ"), national_minutes=row.get("MIN_NAZ"), national_sms=row.get("SMS_NAZ"),
+                    eu_limited=normalize_header(row.get("LIMITAZIONI_UE")) in {"TRUE","SI","1","Y"}, eu_gb=row.get("GB_UE"),
+                    eu_minutes=row.get("MIN_UE"), eu_sms=row.get("SMS_UE"), eu_international_calls=row.get("INT_DA_UE"),
+                    roaming_countries=row.get("PAESI_ROAMING"), international_included=normalize_header(row.get("FLAG_INT")) in {"TRUE","SI","1","Y"},
+                    international_countries=row.get("PAESI_INT"), custom_discounts=discounts,
+                )
+                item = TariffPlan(plan_code=next_plan_code(db), name=name, plan_type=data.plan_type)
+                apply_tariff_data(item, data)
+                db.add(item)
+                db.flush()
+                existing.add(name.casefold())
+                imported += 1
+            except Exception as exc:
+                errors.append({"row": index, "error": str(exc)})
+        db.commit()
+    return {"imported": imported, "skipped": skipped, "errors": errors[:100]}
 
 
 DDT_STATUSES = {"IN_PREPARAZIONE", "SPEDITO", "CONSEGNATO", "ANNULLATO"}

@@ -333,7 +333,7 @@ def classify_asset(row: WindTreImportRow) -> str:
             clean(value)
             for value in (
                 row.asset_type,
-                row.plan,
+                row.current_plan,
                 raw.get("TIPO_ASSET"),
                 raw.get("TIPO_SERVIZIO"),
                 raw.get("CATEGORIA_SERVIZIO"),

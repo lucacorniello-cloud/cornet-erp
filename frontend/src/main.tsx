@@ -1,15 +1,18 @@
 import React, {useEffect, useMemo, useState} from "react";
 import ReactDOM from "react-dom/client";
 import {
-  AlertTriangle, BriefcaseBusiness, CheckCircle2,
-  CircleDollarSign, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LogOut,
-  Search, Settings, Smartphone, Store, UploadCloud, Users, Wifi, XCircle, Zap
+  AlertTriangle, BarChart3, Boxes, BriefcaseBusiness, CheckCircle2, ChevronDown, ChevronRight,
+  CircleDollarSign, Copy, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LogOut,
+  Mail, MessageCircle, Package, Plus, Search, Settings, ShoppingCart, Smartphone, Store,
+  Trash2, UploadCloud, Users, Wifi, XCircle, Zap
 } from "lucide-react";
 import "./style.css";
 
 const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
+const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
+const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"settings";
+type Page="dashboard"|"customers"|"imports"|"products"|"orders"|"inventory"|"simreport"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -53,7 +56,9 @@ function Login({done}:{done:(t:string)=>void}){
 function Workspace({logout}:{logout:()=>void}){
   const [page,setPage]=useState<Page>("dashboard");
   const [store,setStore]=useState<any>(null);
+  const [inventoryFilter,setInventoryFilter]=useState<any>({});
   useEffect(()=>{fetch(API+"/settings/store").then(r=>r.json()).then(setStore)},[]);
+  function openInventory(filter:any={}){setInventoryFilter(filter);setPage("inventory")}
   return <div className="shell">
     <aside>
       <div className="brand">{store?.logo_url?<img className="storelogo" src={assetUrl(store.logo_url)} alt="Logo punto vendita"/>:<div className="logo small">C</div>}<div><b>{store?.store_name||"Cornet ERP"}</b><small>Business Suite</small></div></div>
@@ -61,6 +66,11 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="dashboard"} icon={<LayoutDashboard/>} onClick={()=>setPage("dashboard")}>Dashboard</Nav>
         <Nav active={page==="customers"} icon={<Users/>} onClick={()=>setPage("customers")}>Clienti</Nav>
         <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
+        <div className="navgroup">SIM E MAGAZZINO</div>
+        <Nav active={page==="products"} icon={<Package/>} onClick={()=>setPage("products")}>Prodotti</Nav>
+        <Nav active={page==="orders"} icon={<ShoppingCart/>} onClick={()=>setPage("orders")}>Ordini SIM</Nav>
+        <Nav active={page==="inventory"} icon={<Boxes/>} onClick={()=>openInventory()}>Magazzino SIM</Nav>
+        <Nav active={page==="simreport"} icon={<BarChart3/>} onClick={()=>setPage("simreport")}>Report SIM</Nav>
         <Nav active={page==="settings"} icon={<Settings/>} onClick={()=>setPage("settings")}>Configurazione</Nav>
       </nav>
       <div className="navfoot"><span>VERSIONE</span><b>0.2 · WINDTRE SME</b></div>
@@ -70,6 +80,10 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="dashboard"&&<Dashboard openImports={()=>setPage("imports")}/>}
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
+      {page==="products"&&<Products/>}
+      {page==="orders"&&<SimOrders/>}
+      {page==="inventory"&&<SimInventory initialFilter={inventoryFilter}/>}
+      {page==="simreport"&&<SimReport openInventory={openInventory}/>}
       {page==="settings"&&<StoreConfiguration value={store} saved={setStore}/>}
     </section>
   </div>;
@@ -179,6 +193,116 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
       {campaigns.length>0&&<p className="previewnote">{campaigns.length} campagne distinte rilevate sulle utenze del cliente.</p>}
     </section>
   </div>
+}
+
+function Products(){
+  const [data,setData]=useState<any>({items:[],total:0,average_cost:0});
+  const [search,setSearch]=useState(""),[form,setForm]=useState<any>({sku:"",name:"",unit_cost:""});
+  const [editing,setEditing]=useState<string|null>(null),[file,setFile]=useState<File|null>(null),[message,setMessage]=useState("");
+  const load=()=>fetch(API+"/products?search="+encodeURIComponent(search)).then(r=>r.json()).then(setData);
+  useEffect(()=>{const timer=setTimeout(load,200);return()=>clearTimeout(timer)},[search]);
+  async function save(e:React.FormEvent){
+    e.preventDefault();setMessage("");
+    const response=await fetch(API+(editing?"/products/"+editing:"/products"),{method:editing?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...form,unit_cost:form.unit_cost===""?null:Number(form.unit_cost)})});
+    const result=await response.json();if(!response.ok){setMessage(result.detail||"Salvataggio non riuscito");return}
+    setForm({sku:"",name:"",unit_cost:""});setEditing(null);setMessage("Prodotto salvato");load();
+  }
+  async function remove(id:string){if(!confirm("Rimuovere il prodotto dal catalogo? Gli ordini storici resteranno invariati."))return;await fetch(API+"/products/"+id,{method:"DELETE"});load()}
+  async function importFile(){
+    if(!file)return;const body=new FormData();body.append("file",file);const response=await fetch(API+"/products/import",{method:"POST",body});const result=await response.json();
+    setMessage(response.ok?`Importati ${result.added}, aggiornati ${result.updated}, scartati ${result.rejected}`:(result.detail||"Importazione non riuscita"));if(response.ok){setFile(null);load()}
+  }
+  return <main className="page">
+    <div className="title"><div><small>MASTER DATA CATALOG</small><h1>Anagrafica prodotti</h1><p>Catalogo unico per ordini, magazzino e reportistica SIM.</p></div></div>
+    <div className="kpis compactkpis"><Card label="Prodotti attivi" value={data.total}/><Card label="Costo medio" value={formatCurrency(data.average_cost)}/></div>
+    <div className="modulegrid">
+      <form className="modulecard" onSubmit={save}><h2>{editing?"Modifica prodotto":"Nuovo prodotto"}</h2><div className="modulefields"><label>Codice articolo / SKU<input value={form.sku} onChange={e=>setForm({...form,sku:e.target.value})} required/></label><label>Nome prodotto<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} required/></label><label>Costo unitario (€)<input type="number" step="0.01" min="0" value={form.unit_cost} onChange={e=>setForm({...form,unit_cost:e.target.value})}/></label></div><div className="rowactions">{editing&&<button type="button" className="secondary" onClick={()=>{setEditing(null);setForm({sku:"",name:"",unit_cost:""})}}>Annulla</button>}<button className="new">{editing?"Aggiorna":"Crea prodotto"}</button></div>{message&&<p className="formmessage">{message}</p>}</form>
+      <section className="modulecard"><h2>Importazione massiva</h2><p className="muted">CSV o Excel con colonne Codice/SKU, Nome/Descrizione e Costo.</p><label className="drop compactdrop"><UploadCloud/><span>{file?.name||"Seleziona CSV o Excel"}</span><input type="file" accept=".csv,.xlsx,.xlsm" onChange={e=>setFile(e.target.files?.[0]||null)}/></label><button className="new" disabled={!file} onClick={importFile}>Importa catalogo</button></section>
+    </div>
+    <div className="toolbar"><div className="inputsearch"><Search/><input placeholder="Cerca codice o prodotto..." value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
+    <article className="tablecard"><table><thead><tr><th>SKU</th><th>Prodotto</th><th>Costo unitario</th><th></th></tr></thead><tbody>{data.items.map((item:any)=><tr key={item.id}><td><b>{item.sku}</b></td><td>{item.name}</td><td>{item.unit_cost==null?"—":formatCurrency(item.unit_cost)}</td><td><div className="tableactions"><button className="linkbtn" onClick={()=>{setEditing(item.id);setForm({sku:item.sku,name:item.name,unit_cost:item.unit_cost??""});scrollTo({top:0,behavior:"smooth"})}}>Modifica</button><button className="dangerbtn" onClick={()=>remove(item.id)}><Trash2/></button></div></td></tr>)}</tbody></table></article>
+  </main>;
+}
+
+function SimOrders(){
+  const [products,setProducts]=useState<any[]>([]),[orders,setOrders]=useState<any[]>([]),[message,setMessage]=useState("");
+  const blank=()=>({order_number:"",order_date:new Date().toISOString().slice(0,10),supplier:"WindTre",notes:"",status:"INVIATO",lines:[{product_id:"",quantity:1,description:""}]});
+  const [form,setForm]=useState<any>(blank());
+  const load=()=>Promise.all([fetch(API+"/products").then(r=>r.json()).then(d=>setProducts(d.items)),fetch(API+"/sim-orders").then(r=>r.json()).then(setOrders)]);
+  useEffect(()=>{load()},[]);
+  function updateLine(index:number,field:string,value:any){setForm({...form,lines:form.lines.map((line:any,i:number)=>i===index?{...line,[field]:value}:line)})}
+  async function quickProduct(){
+    const sku=prompt("Codice articolo / SKU");if(!sku)return;const name=prompt("Nome prodotto");if(!name)return;
+    const response=await fetch(API+"/products",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sku,name,unit_cost:null})});
+    if(response.ok){const item=await response.json();await load();updateLine(form.lines.length-1,"product_id",item.id)}
+  }
+  async function create(e:React.FormEvent){
+    e.preventDefault();setMessage("");
+    const response=await fetch(API+"/sim-orders",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...form,lines:form.lines.map((line:any)=>({...line,quantity:Number(line.quantity)}))})});
+    const result=await response.json();if(!response.ok){setMessage(result.detail||"Creazione non riuscita");return}setForm(blank());setMessage(`Ordine ${result.order_number} creato`);load();
+  }
+  async function changeStatus(id:string,status:string){await fetch(API+"/sim-orders/"+id+"/status",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});load()}
+  async function share(order:any,channel:"whatsapp"|"email"|"copy"){
+    const result=await fetch(API+"/sim-orders/"+order.id+"/share").then(r=>r.json());
+    if(channel==="copy"){await navigator.clipboard.writeText(result.text);setMessage("Testo ordine copiato")}
+    if(channel==="whatsapp")window.open("https://wa.me/?text="+encodeURIComponent(result.text),"_blank");
+    if(channel==="email")window.location.href="mailto:?subject="+encodeURIComponent(result.subject)+"&body="+encodeURIComponent(result.text);
+  }
+  return <main className="page">
+    <div className="title"><div><small>PROCUREMENT</small><h1>Ordini SIM</h1><p>Pianifica e monitora gli approvvigionamenti fino alla ricezione.</p></div></div>
+    <form className="modulecard orderform" onSubmit={create}><h2>Nuovo ordine</h2><div className="modulefields three"><label>ID ordine (facoltativo)<input placeholder="Automatico: ORD-2026-001" value={form.order_number} onChange={e=>setForm({...form,order_number:e.target.value})}/></label><label>Data<input type="date" value={form.order_date} onChange={e=>setForm({...form,order_date:e.target.value})}/></label><label>Fornitore<input value={form.supplier} onChange={e=>setForm({...form,supplier:e.target.value})}/></label></div>
+      <div className="orderlines"><div className="linehead"><b>Righe ordine</b><button type="button" className="secondary" onClick={()=>setForm({...form,lines:[...form.lines,{product_id:"",quantity:1,description:""}]})}><Plus/>Aggiungi riga</button></div>{form.lines.map((line:any,index:number)=><div className="orderline" key={index}><select value={line.product_id} onChange={e=>updateLine(index,"product_id",e.target.value)} required><option value="">Seleziona prodotto</option>{products.map(p=><option key={p.id} value={p.id}>{p.sku} · {p.name}</option>)}</select><input type="number" min="1" value={line.quantity} onChange={e=>updateLine(index,"quantity",e.target.value)}/><input placeholder="Note riga" value={line.description} onChange={e=>updateLine(index,"description",e.target.value)}/><button type="button" className="dangerbtn" disabled={form.lines.length===1} onClick={()=>setForm({...form,lines:form.lines.filter((_:any,i:number)=>i!==index)})}><Trash2/></button></div>)}</div>
+      <button type="button" className="textbtn" onClick={quickProduct}><Plus/>Crea rapidamente un prodotto</button><label className="widefield">Note ordine<textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></label><div className="rowactions"><button className="new"><ShoppingCart/>Crea ordine</button></div>{message&&<p className="formmessage">{message}</p>}
+    </form>
+    <div className="ordercards">{orders.map(order=><article className="ordercard" key={order.id}><div className="orderhead"><div><small>{formatDate(order.order_date)}</small><h3>{order.order_number}</h3><p>{order.supplier||"Fornitore non indicato"} · {order.total_quantity} SIM</p></div><select value={order.status} onChange={e=>changeStatus(order.id,e.target.value)}>{ORDER_STATUSES.map(s=><option key={s}>{s}</option>)}</select></div><div className="orderitems">{order.lines.map((line:any)=><div key={line.id}><span>{line.sku} · {line.product_name}</span><b>{line.quantity}</b></div>)}</div><div className="shareactions"><button onClick={()=>share(order,"whatsapp")}><MessageCircle/>WhatsApp</button><button onClick={()=>share(order,"email")}><Mail/>Email</button><button onClick={()=>share(order,"copy")}><Copy/>Copia testo</button></div></article>)}</div>
+  </main>;
+}
+
+function SimInventory({initialFilter}:{initialFilter:any}){
+  const [products,setProducts]=useState<any[]>([]),[orders,setOrders]=useState<any[]>([]),[customers,setCustomers]=useState<any[]>([]);
+  const [items,setItems]=useState<any[]>([]),[message,setMessage]=useState("");
+  const [filters,setFilters]=useState<any>({search:"",status:"",product_id:"",order_id:"",...initialFilter});
+  const [form,setForm]=useState<any>({iccid:"",product_id:"",order_id:"",status:"IN_MAGAZZINO",customer_id:null,msisdn:""});
+  const [importForm,setImportForm]=useState<any>({file:null,product_sku:"",order_number:"",default_status:"IN_MAGAZZINO"});
+  const loadDependencies=()=>Promise.all([fetch(API+"/products").then(r=>r.json()).then(d=>setProducts(d.items)),fetch(API+"/sim-orders").then(r=>r.json()).then(setOrders),fetch(API+"/customers?limit=500").then(r=>r.json()).then(setCustomers)]);
+  const load=()=>{const query=new URLSearchParams(Object.entries(filters).filter(([,v])=>v) as any);return fetch(API+"/sim-inventory?"+query).then(r=>r.json()).then(setItems)};
+  useEffect(()=>{loadDependencies()},[]);
+  useEffect(()=>{setFilters((current:any)=>({...current,...initialFilter}))},[JSON.stringify(initialFilter)]);
+  useEffect(()=>{const timer=setTimeout(load,180);return()=>clearTimeout(timer)},[JSON.stringify(filters)]);
+  async function create(e:React.FormEvent){
+    e.preventDefault();const response=await fetch(API+"/sim-inventory",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...form,order_id:form.order_id||null,customer_id:form.customer_id||null})});
+    const result=await response.json();setMessage(response.ok?"SIM inserita":result.detail||"Inserimento non riuscito");if(response.ok){setForm({...form,iccid:"",msisdn:""});load()}
+  }
+  async function update(item:any,patch:any){const response=await fetch(API+"/sim-inventory/"+item.id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:item.status,customer_id:item.customer_id,msisdn:item.msisdn,...patch})});if(response.ok)load()}
+  async function importFile(){
+    if(!importForm.file)return;const body=new FormData();body.append("file",importForm.file);body.append("product_sku",importForm.product_sku);body.append("order_number",importForm.order_number);body.append("default_status",importForm.default_status);
+    const response=await fetch(API+"/sim-inventory/import",{method:"POST",body});const result=await response.json();setMessage(response.ok?`Carico completato: ${result.added} nuove, ${result.updated} aggiornate, ${result.rejected} scartate`:result.detail);if(response.ok)load();
+  }
+  async function quickCustomer(){
+    const business_name=prompt("Ragione sociale / Nome cliente");if(!business_name)return;const tax_id=prompt("Partita IVA o codice fiscale (facoltativo)")||"";const address=prompt("Indirizzo (facoltativo)")||"";
+    const response=await fetch(API+"/customers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({business_name,tax_id,address})});if(response.ok){setMessage("Cliente creato");loadDependencies()}else setMessage((await response.json()).detail);
+  }
+  return <main className="page">
+    <div className="title"><div><small>STOCK & SERIAL LIFECYCLE</small><h1>Magazzino SIM</h1><p>Traccia ogni ICCID dall’ordine fino all’assegnazione e attivazione.</p></div><button className="secondary" onClick={quickCustomer}><Plus/>Nuovo cliente rapido</button></div>
+    <div className="modulegrid">
+      <form className="modulecard" onSubmit={create}><h2>Inserisci singola SIM</h2><div className="modulefields"><label>ICCID<input inputMode="numeric" value={form.iccid} onChange={e=>setForm({...form,iccid:e.target.value})} required/></label><label>Prodotto<select value={form.product_id} onChange={e=>setForm({...form,product_id:e.target.value})} required><option value="">Seleziona</option>{products.map(p=><option key={p.id} value={p.id}>{p.sku} · {p.name}</option>)}</select></label><label>Ordine<select value={form.order_id} onChange={e=>setForm({...form,order_id:e.target.value})}><option value="">Nessun ordine</option>{orders.map(o=><option key={o.id} value={o.id}>{o.order_number}</option>)}</select></label><label>Stato<select value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>{SIM_STATUSES.map(s=><option key={s}>{s}</option>)}</select></label></div><button className="new">Registra SIM</button></form>
+      <section className="modulecard"><h2>Carico massivo seriali</h2><label className="drop compactdrop"><UploadCloud/><span>{importForm.file?.name||"CSV o Excel con ICCID"}</span><input type="file" accept=".csv,.xlsx,.xlsm" onChange={e=>setImportForm({...importForm,file:e.target.files?.[0]||null})}/></label><div className="modulefields"><label>Prodotto predefinito<select value={importForm.product_sku} onChange={e=>setImportForm({...importForm,product_sku:e.target.value})}><option value="">Dal file</option>{products.map(p=><option key={p.id} value={p.sku}>{p.sku}</option>)}</select></label><label>Ordine predefinito<select value={importForm.order_number} onChange={e=>setImportForm({...importForm,order_number:e.target.value})}><option value="">Dal file / nessuno</option>{orders.map(o=><option key={o.id} value={o.order_number}>{o.order_number}</option>)}</select></label></div><button className="new" disabled={!importForm.file} onClick={importFile}>Carica lotto</button></section>
+    </div>
+    {message&&<div className="notice ok">{message}</div>}
+    <div className="filterbar"><div className="inputsearch"><Search/><input placeholder="ICCID, MSISDN, cliente, ordine o prodotto..." value={filters.search} onChange={e=>setFilters({...filters,search:e.target.value})}/></div><select value={filters.status} onChange={e=>setFilters({...filters,status:e.target.value})}><option value="">Tutti gli stati</option>{SIM_STATUSES.map(s=><option key={s}>{s}</option>)}</select><select value={filters.product_id} onChange={e=>setFilters({...filters,product_id:e.target.value})}><option value="">Tutti i prodotti</option>{products.map(p=><option key={p.id} value={p.id}>{p.sku}</option>)}</select><button className="secondary" onClick={()=>setFilters({search:"",status:"",product_id:"",order_id:""})}>Azzera</button></div>
+    <article className="tablecard"><table><thead><tr><th>ICCID / MSISDN</th><th>Prodotto</th><th>Ordine</th><th>Stato</th><th>Cliente assegnato</th></tr></thead><tbody>{items.map(item=><tr key={item.id}><td><b className="mono">{item.iccid}</b><small>{item.msisdn||"Nessun numero"}</small></td><td>{item.sku}<small>{item.product_name}</small></td><td>{item.order_number||"—"}</td><td><select className="statusselect" value={item.status} onChange={e=>update(item,{status:e.target.value})}>{SIM_STATUSES.map(s=><option key={s}>{s}</option>)}</select></td><td><select value={item.customer_id||""} onChange={e=>update(item,{customer_id:e.target.value||null,status:e.target.value?"ASSEGNATA":item.status})}><option value="">Non assegnata</option>{customers.map(c=><option key={c.id} value={c.id}>{c.business_name}</option>)}</select></td></tr>)}</tbody></table></article>
+  </main>;
+}
+
+function SimReport({openInventory}:{openInventory:(filter:any)=>void}){
+  const [report,setReport]=useState<any>(null),[open,setOpen]=useState<Record<string,boolean>>({});
+  useEffect(()=>{fetch(API+"/sim-report").then(r=>r.json()).then(setReport)},[]);
+  if(!report)return <main className="page"><div className="loading">Caricamento report…</div></main>;
+  return <main className="page">
+    <div className="title"><div><small>STOCK ANALYTICS</small><h1>Report SIM</h1><p>Giacenze consolidate per ordine e articolo.</p></div></div>
+    <div className="kpis"><Card label="SIM censite" value={report.total}/><Card label="Disponibili" value={report.available}/><Card label="Assegnate / utilizzate" value={report.assigned}/><Card label="Tasso assegnazione" value={report.assignment_rate+"%"}/></div>
+    <div className="reporttree">{report.orders.map((order:any)=><article key={order.order_id||"none"} className="reportorder"><button className="reportorderhead" onClick={()=>setOpen({...open,[order.order_number]:!open[order.order_number]})}>{open[order.order_number]?<ChevronDown/>:<ChevronRight/>}<div><b>{order.order_number}</b><small>{order.order_date?formatDate(order.order_date):"Seriali senza ordine"} · {order.status||""}</small></div><span>{order.products.reduce((sum:number,p:any)=>sum+p.total,0)} SIM caricate</span></button>{open[order.order_number]&&<div className="reportproducts">{order.products.map((product:any)=><button key={product.product_id} onClick={()=>openInventory({order_id:order.order_id||"",product_id:product.product_id})}><div><b>{product.sku}</b><small>{product.product_name}</small></div><div className="stocknumbers"><span>Ordinate <b>{product.ordered}</b></span><span>Caricate <b>{product.total}</b></span><span>Disponibili <b>{product.available}</b></span><span>Assegnate <b>{product.total-product.available}</b></span></div></button>)}</div>}</article>)}</div>
+  </main>;
 }
 
 function Imports(){
@@ -312,6 +436,7 @@ function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
 }
 
 function Metric({label,value,tone}:{label:string;value:number;tone:string}){return <div className="metric"><span className={tone}></span><b>{label}</b><strong>{value}</strong></div>}
+function Card({label,value}:{label:string;value:any}){return <article className="card"><span>{label}</span><strong>{value}</strong></article>}
 function Empty({icon,text}:{icon:React.ReactNode;text:string}){return <div className="empty">{icon}<b>{text}</b><span>Il contenuto sarà aggiornato automaticamente.</span></div>}
 function Status({value}:{value:string}){return <span className={"badge "+(value==="ACTIVE"?"active":"missing")}>{value==="ACTIVE"?"Presente":"Da verificare"}</span>}
 function monthLabel(value:string){if(!value)return"—";const [y,m]=value.split("-");return new Intl.DateTimeFormat("it-IT",{month:"long",year:"numeric"}).format(new Date(Number(y),Number(m)-1,1))}

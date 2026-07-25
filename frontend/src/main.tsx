@@ -1,0 +1,162 @@
+import React, {useEffect, useMemo, useState} from "react";
+import ReactDOM from "react-dom/client";
+import {
+  AlertTriangle, ArrowLeftRight, BriefcaseBusiness, Building2, CheckCircle2,
+  FileClock, FileSpreadsheet, History, LayoutDashboard, LogOut, Search,
+  UploadCloud, Users, XCircle
+} from "lucide-react";
+import "./style.css";
+
+const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
+
+type Page="dashboard"|"customers"|"imports";
+type ImportSummary={
+  id:string; competence_month:string; file_name:string; status:string; row_count:number;
+  customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
+  removed_assets:number; field_changes:number; campaign_changes:number; uploaded_at:string;
+};
+
+function App(){
+  const [logged,setLogged]=useState(!!localStorage.getItem("token"));
+  return logged
+    ? <Workspace logout={()=>{localStorage.clear();setLogged(false)}}/>
+    : <Login done={(t)=>{localStorage.setItem("token",t);setLogged(true)}}/>;
+}
+
+function Login({done}:{done:(t:string)=>void}){
+  const [email,setEmail]=useState("admin@cornet.local");
+  const [password,setPassword]=useState("Cornet123!");
+  const [error,setError]=useState("");
+  async function submit(e:React.FormEvent){
+    e.preventDefault(); setError("");
+    try{
+      const r=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})});
+      if(!r.ok){setError("Credenziali non valide");return;}
+      const d=await r.json(); done(d.access_token);
+    }catch{setError("Il server non è raggiungibile");}
+  }
+  return <main className="login">
+    <section className="hero"><div className="logo">C</div><div><small>CORNET SOLUTIONS</small><h1>Il centro operativo del tuo negozio.</h1><p>Clienti, contratti, portafoglio Business e attività in un unico ambiente.</p></div></section>
+    <section className="formwrap"><form onSubmit={submit}><small>CORNET ERP 0.2</small><h2>Accedi al gestionale</h2><label>Email<input value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<div className="error">{error}</div>}<button>Accedi</button></form></section>
+  </main>;
+}
+
+function Workspace({logout}:{logout:()=>void}){
+  const [page,setPage]=useState<Page>("dashboard");
+  return <div className="shell">
+    <aside>
+      <div className="brand"><div className="logo small">C</div><div><b>Cornet ERP</b><small>Business Suite</small></div></div>
+      <nav>
+        <Nav active={page==="dashboard"} icon={<LayoutDashboard/>} onClick={()=>setPage("dashboard")}>Dashboard</Nav>
+        <Nav active={page==="customers"} icon={<Users/>} onClick={()=>setPage("customers")}>Clienti</Nav>
+        <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
+      </nav>
+      <div className="navfoot"><span>VERSIONE</span><b>0.2 · WINDTRE SME</b></div>
+    </aside>
+    <section className="content">
+      <header><div className="search"><Search size={17}/>Cerca clienti, codici, linee e campagne...</div><button className="icon" onClick={logout} title="Esci"><LogOut size={18}/></button></header>
+      {page==="dashboard"&&<Dashboard openImports={()=>setPage("imports")}/>}
+      {page==="customers"&&<Customers/>}
+      {page==="imports"&&<Imports/>}
+    </section>
+  </div>;
+}
+
+function Nav({active,icon,onClick,children}:{active:boolean;icon:React.ReactNode;onClick:()=>void;children:React.ReactNode}){
+  return <button className={active?"active":""} onClick={onClick}>{icon}<span>{children}</span></button>;
+}
+
+function Dashboard({openImports}:{openImports:()=>void}){
+  const [s,setS]=useState<any>(null);
+  useEffect(()=>{fetch(API+"/dashboard/summary").then(r=>r.json()).then(setS)},[]);
+  const last=s?.last_import;
+  return <main className="page">
+    <div className="title"><div><small>CENTRO OPERATIVO</small><h1>Buongiorno, Luca.</h1><p>Portafoglio clienti e variazioni WINDTRE Business.</p></div><button className="new" onClick={openImports}><UploadCloud size={18}/>Importa estrazione</button></div>
+    <div className="status"><span></span><div><b>{last?"Ultima estrazione acquisita":"Pronto per la prima estrazione"}</b><p>{last?`${monthLabel(last.competence_month)} · ${last.customer_count} clienti · ${last.row_count} righe`:"Carica il file Excel mensile del DB Tool WINDTRE"}</p></div></div>
+    <div className="kpis">
+      <Card icon={<Users/>} label="Clienti CRM" value={s?.customers}/>
+      <Card icon={<Building2/>} label="Clienti SME importati" value={last?.customer_count??0}/>
+      <Card icon={<ArrowLeftRight/>} label="Variazioni rilevate" value={last?(last.field_changes+last.campaign_changes):0}/>
+      <Card icon={<AlertTriangle/>} label="Non più presenti" value={last?.missing_customers??0}/>
+    </div>
+    <div className="grid">
+      <article><h2>Monitoraggio mensile</h2>{last?<div className="metriclist">
+        <Metric label="Nuovi clienti" value={last.new_customers} tone="positive"/>
+        <Metric label="Nuovi asset" value={last.new_assets} tone="positive"/>
+        <Metric label="Asset non più presenti" value={last.removed_assets} tone="warning"/>
+        <Metric label="Cambi campagne" value={last.campaign_changes} tone="brand"/>
+      </div>:<Empty icon={<FileSpreadsheet/>} text="Nessuna estrazione caricata"/>}</article>
+      <article><h2>Controlli consigliati</h2><p>Clienti assenti dall’ultima estrazione</p><p>Variazioni piano e canone</p><p>Ingressi e uscite dalle campagne</p></article>
+    </div>
+  </main>;
+}
+
+function Customers(){
+  const [items,setItems]=useState<any[]>([]);
+  const [search,setSearch]=useState("");
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    setLoading(true);
+    const timer=setTimeout(()=>fetch(API+"/customers?segment=BUSINESS_SME&search="+encodeURIComponent(search)).then(r=>r.json()).then(setItems).finally(()=>setLoading(false)),250);
+    return()=>clearTimeout(timer);
+  },[search]);
+  return <main className="page">
+    <div className="title"><div><small>CRM · BUSINESS SME</small><h1>Portafoglio clienti</h1><p>Clienti consolidati dalle estrazioni mensili WINDTRE.</p></div></div>
+    <div className="toolbar"><div className="inputsearch"><Search size={17}/><input placeholder="Ragione sociale, P.IVA, codice cliente..." value={search} onChange={e=>setSearch(e.target.value)}/></div><span>{items.length} clienti</span></div>
+    <article className="tablecard">{loading?<div className="loading">Caricamento…</div>:items.length?<table><thead><tr><th>Cliente</th><th>Codice WINDTRE</th><th>P.IVA / C.F.</th><th>Ultima presenza</th><th>Stato</th></tr></thead><tbody>{items.map(c=><tr key={c.id}><td><b>{c.business_name}</b><small>Business SME</small></td><td>{c.windtre_customer_code||"—"}</td><td>{c.tax_id||c.fiscal_code||"—"}</td><td>{c.last_seen_month?monthLabel(c.last_seen_month):"—"}</td><td><Status value={c.portfolio_status}/></td></tr>)}</tbody></table>:<Empty icon={<Users/>} text="I clienti compariranno dopo la prima importazione"/>}</article>
+  </main>;
+}
+
+function Imports(){
+  const [history,setHistory]=useState<ImportSummary[]>([]);
+  const [selected,setSelected]=useState<any>(null);
+  const [month,setMonth]=useState(new Date().toISOString().slice(0,7));
+  const [file,setFile]=useState<File|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [message,setMessage]=useState<{kind:"ok"|"error";text:string}|null>(null);
+  const load=()=>fetch(API+"/windtre-imports").then(r=>r.json()).then(setHistory);
+  useEffect(()=>{load()},[]);
+  async function upload(e:React.FormEvent){
+    e.preventDefault(); if(!file)return; setBusy(true);setMessage(null);
+    const data=new FormData();data.append("competence_month",month);data.append("file",file);
+    try{
+      const r=await fetch(API+"/windtre-imports",{method:"POST",body:data});
+      const result=await r.json();
+      if(!r.ok)throw new Error(result.detail||"Importazione non riuscita");
+      setMessage({kind:"ok",text:`Importazione completata: ${result.customer_count} clienti e ${result.row_count} righe.`});
+      setFile(null); await load(); await showDetail(result.id);
+    }catch(err:any){setMessage({kind:"error",text:err.message});}
+    finally{setBusy(false);}
+  }
+  async function showDetail(id:string){const r=await fetch(API+"/windtre-imports/"+id);setSelected(await r.json())}
+  return <main className="page">
+    <div className="title"><div><small>WINDTRE BUSINESS SME</small><h1>Importazioni mensili</h1><p>Conserva ogni fotografia del portafoglio e confronta automaticamente i mesi.</p></div></div>
+    <div className="importgrid">
+      <form className="uploadcard" onSubmit={upload}>
+        <div className="uploadicon"><UploadCloud/></div><div><h2>Carica estrazione DB Tool</h2><p>File Excel .xlsx o .xlsm, massimo 40 MB.</p></div>
+        <label>Mese di competenza<input type="month" value={month} onChange={e=>setMonth(e.target.value)} required/></label>
+        <label className="drop"><FileSpreadsheet/><span>{file?file.name:"Seleziona il file Excel"}</span><input type="file" accept=".xlsx,.xlsm" onChange={e=>setFile(e.target.files?.[0]||null)}/></label>
+        {message&&<div className={"notice "+message.kind}>{message.kind==="ok"?<CheckCircle2/>:<XCircle/>}{message.text}</div>}
+        <button className="new" disabled={!file||busy}>{busy?"Analisi in corso…":"Importa e confronta"}</button>
+      </form>
+      <article className="explain"><h2>Cosa viene controllato</h2><ul><li>Nuovi clienti e clienti non più presenti</li><li>Nuove linee, SIM e asset rimossi</li><li>Cambi di piano, stato, canone e servizi</li><li>Ingressi, uscite e livelli delle campagne V_, C_ e I_</li></ul><div className="privacy">Il file originale non viene salvato: conserviamo dati strutturati, impronta del file e storico delle differenze.</div></article>
+    </div>
+    <div className="sectiontitle"><div><History/><h2>Storico importazioni</h2></div><span>{history.length} estrazioni</span></div>
+    <article className="tablecard">{history.length?<table><thead><tr><th>Mese</th><th>File</th><th>Clienti</th><th>Nuovi</th><th>Assenti</th><th>Variazioni</th><th></th></tr></thead><tbody>{history.map(i=><tr key={i.id}><td><b>{monthLabel(i.competence_month)}</b></td><td>{i.file_name}<small>{i.row_count} righe</small></td><td>{i.customer_count}</td><td className="positive">{i.new_customers}</td><td className="warning">{i.missing_customers}</td><td>{i.field_changes+i.campaign_changes}</td><td><button className="linkbtn" onClick={()=>showDetail(i.id)}>Dettagli</button></td></tr>)}</tbody></table>:<Empty icon={<History/>} text="Nessuna importazione nello storico"/>}</article>
+    {selected&&<ImportDetail item={selected} close={()=>setSelected(null)}/>}
+  </main>;
+}
+
+function ImportDetail({item,close}:{item:any;close:()=>void}){
+  const grouped=useMemo(()=>Object.entries((item.changes||[]).reduce((acc:any,c:any)=>{(acc[c.change_type]??=[]).push(c);return acc},{})),[item]);
+  return <div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)close()}}><section className="drawer"><button className="close" onClick={close}>×</button><small>ESTRAZIONE {item.competence_month}</small><h2>{item.file_name}</h2><div className="miniKpis"><b>{item.customer_count}<span>Clienti</span></b><b>{item.new_customers}<span>Nuovi</span></b><b>{item.missing_customers}<span>Assenti</span></b><b>{item.campaign_changes}<span>Campagne</span></b></div>{grouped.length?grouped.map(([name,changes]:any)=><div className="changegroup" key={name}><h3>{changeLabel(name)} <span>{changes.length}</span></h3>{changes.slice(0,100).map((c:any)=><div className="change" key={c.id}><div><b>{c.customer_key}</b><small>{c.asset_key||"Cliente"}</small></div><div><strong>{c.field_name||changeLabel(c.change_type)}</strong><small>{c.old_value||"—"} → {c.new_value||"—"}</small></div></div>)}</div>):<Empty icon={<CheckCircle2/>} text="Prima fotografia acquisita: nessun mese precedente da confrontare"/>}</section></div>;
+}
+
+function Card({label,value,icon}:{label:string;value:any;icon?:React.ReactNode}){return <article className="card">{icon}<span>{label}</span><strong>{value??"—"}</strong><small>Aggiornato ora</small></article>}
+function Metric({label,value,tone}:{label:string;value:number;tone:string}){return <div className="metric"><span className={tone}></span><b>{label}</b><strong>{value}</strong></div>}
+function Empty({icon,text}:{icon:React.ReactNode;text:string}){return <div className="empty">{icon}<b>{text}</b><span>Il contenuto sarà aggiornato automaticamente.</span></div>}
+function Status({value}:{value:string}){return <span className={"badge "+(value==="ACTIVE"?"active":"missing")}>{value==="ACTIVE"?"Presente":"Da verificare"}</span>}
+function monthLabel(value:string){if(!value)return"—";const [y,m]=value.split("-");return new Intl.DateTimeFormat("it-IT",{month:"long",year:"numeric"}).format(new Date(Number(y),Number(m)-1,1))}
+function changeLabel(value:string){return({NEW_CUSTOMER:"Nuovi clienti",MISSING_CUSTOMER:"Clienti non più presenti",NEW_ASSET:"Nuovi asset",REMOVED_ASSET:"Asset non più presenti",FIELD_CHANGED:"Variazioni servizi",CAMPAIGN_ENTERED:"Ingresso campagne",CAMPAIGN_EXITED:"Uscita campagne",CAMPAIGN_CHANGED:"Variazione campagne"} as any)[value]||value}
+
+ReactDOM.createRoot(document.getElementById("root")!).render(<App/>);

@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cornet_erp
+      POSTGRES_USER: cornet
+      POSTGRES_PASSWORD: cornet_dev_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cornet -d cornet_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://cornet:cornet_dev_password@db:5432/cornet_erp
+      SECRET_KEY: local-development-secret
+      FRONTEND_ORIGIN: http://localhost:5173
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: ["8000:8000"]
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_URL: http://localhost:8000/api/v1
+    depends_on: [backend]
+    ports: ["5173:5173"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:

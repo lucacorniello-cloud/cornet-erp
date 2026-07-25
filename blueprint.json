@@ -1,0 +1,37 @@
+{
+  "product": "Cornet ERP 3.0",
+  "architecture": "modular_monolith",
+  "frontend": [
+    "React",
+    "TypeScript",
+    "Vite",
+    "TanStack Query",
+    "Tailwind CSS"
+  ],
+  "backend": [
+    "FastAPI",
+    "SQLAlchemy 2",
+    "PostgreSQL",
+    "Alembic",
+    "Redis"
+  ],
+  "domains": [
+    "identity",
+    "stores",
+    "crm",
+    "contracts",
+    "services",
+    "practices",
+    "activities",
+    "documents",
+    "imports",
+    "campaigns",
+    "inventory",
+    "repairs",
+    "reporting",
+    "audit",
+    "ai",
+    "notifications"
+  ],
+  "first_milestone": "identity_and_crm"
+}

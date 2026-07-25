@@ -1,0 +1,71 @@
+openapi: 3.1.0
+info:
+  title: Cornet ERP API
+  version: 0.1.0
+servers:
+  - url: /api/v1
+paths:
+  /customers:
+    get:
+      summary: Elenco clienti
+      parameters:
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: type
+          schema: { type: string, enum: [person, company] }
+      responses:
+        "200":
+          description: Lista clienti
+    post:
+      summary: Crea cliente
+      responses:
+        "201":
+          description: Cliente creato
+  /customers/{customer_id}:
+    get:
+      summary: Dettaglio cliente
+      parameters:
+        - in: path
+          name: customer_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Dettaglio cliente
+  /contracts:
+    get:
+      summary: Elenco contratti
+      responses:
+        "200":
+          description: Lista contratti
+    post:
+      summary: Crea contratto
+      responses:
+        "201":
+          description: Contratto creato
+  /imports/pdc:
+    post:
+      summary: Carica una o più PDC
+      responses:
+        "202":
+          description: Elaborazione avviata
+  /imports/{import_id}/review:
+    get:
+      summary: Recupera confronto e campi estratti
+      responses:
+        "200":
+          description: Revisione importazione
+  /imports/{import_id}/confirm:
+    post:
+      summary: Conferma importazione
+      responses:
+        "200":
+          description: Importazione completata
+  /search:
+    get:
+      summary: Ricerca universale
+      responses:
+        "200":
+          description: Risultati ricerca

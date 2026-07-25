@@ -9,6 +9,8 @@ from app.main import (
     build_preview,
     classify_asset,
     customer_service_pivot,
+    normalize_iccid,
+    parse_uploaded_table,
     find_activation_date,
     parse_monthly_fee,
     parse_workbook,
@@ -202,6 +204,15 @@ class WindTreParserTests(unittest.TestCase):
             customer_service_pivot(rows),
             [{"plan": "SUPER Unlimited", "count": 2, "mrr": 33.98}],
         )
+
+    def test_reads_product_csv_and_normalizes_iccid(self):
+        rows = parse_uploaded_table(
+            "prodotti.csv",
+            "Codice;Nome Prodotto;Costo\nSIM_TRIO;SIM Trio Business;2,50\n".encode(),
+        )
+        self.assertEqual(rows[0]["CODICE"], "SIM_TRIO")
+        self.assertEqual(rows[0]["NOME_PRODOTTO"], "SIM Trio Business")
+        self.assertEqual(normalize_iccid("8939 8808-6800-2220-727"), "8939880868002220727")
 
 
 if __name__ == "__main__":

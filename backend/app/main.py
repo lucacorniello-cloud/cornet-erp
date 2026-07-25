@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+import csv
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -28,7 +29,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -64,6 +65,7 @@ class Customer(Base):
     windtre_customer_code: Mapped[str | None] = mapped_column(String(80), index=True)
     email: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(80))
+    address: Mapped[str | None] = mapped_column(String(255))
     portfolio_status: Mapped[str] = mapped_column(String(40), default="ACTIVE")
     first_seen_month: Mapped[str | None] = mapped_column(String(7))
     last_seen_month: Mapped[str | None] = mapped_column(String(7))
@@ -151,6 +153,79 @@ class StoreSettings(Base):
     )
 
 
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sku: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    unit_cost_cents: Mapped[int | None] = mapped_column(Integer)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SimOrder(Base):
+    __tablename__ = "sim_orders"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_number: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    order_date: Mapped[date] = mapped_column(Date, default=date.today)
+    supplier: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(40), default="INVIATO")
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    lines: Mapped[list["SimOrderLine"]] = relationship(cascade="all, delete-orphan")
+
+
+class SimOrderLine(Base):
+    __tablename__ = "sim_order_lines"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sim_orders.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    description: Mapped[str | None] = mapped_column(Text)
+    product: Mapped[Product] = relationship()
+
+
+class SimInventory(Base):
+    __tablename__ = "sim_inventory"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    iccid: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    product_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), index=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sim_orders.id", ondelete="SET NULL"), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="IN_MAGAZZINO", index=True)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    msisdn: Mapped[str | None] = mapped_column(String(30), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    product: Mapped[Product] = relationship()
+    order: Mapped[SimOrder | None] = relationship()
+    customer: Mapped[Customer | None] = relationship()
+
+
+class SimInventoryImport(Base):
+    __tablename__ = "sim_inventory_imports"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_name: Mapped[str] = mapped_column(String(255))
+    added_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_count: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -175,6 +250,52 @@ class StoreSettingsRequest(BaseModel):
     whatsapp: str | None = None
     email: str | None = None
     website: str | None = None
+
+
+class ProductRequest(BaseModel):
+    sku: str
+    name: str
+    unit_cost: float | None = None
+
+
+class OrderLineRequest(BaseModel):
+    product_id: uuid.UUID
+    quantity: int
+    description: str | None = None
+
+
+class SimOrderRequest(BaseModel):
+    order_number: str | None = None
+    order_date: date = date.today()
+    supplier: str | None = None
+    notes: str | None = None
+    status: str = "INVIATO"
+    lines: list[OrderLineRequest]
+
+
+class OrderStatusRequest(BaseModel):
+    status: str
+
+
+class SimInventoryRequest(BaseModel):
+    iccid: str
+    product_id: uuid.UUID
+    order_id: uuid.UUID | None = None
+    status: str = "IN_MAGAZZINO"
+    customer_id: uuid.UUID | None = None
+    msisdn: str | None = None
+
+
+class SimInventoryUpdate(BaseModel):
+    status: str | None = None
+    customer_id: uuid.UUID | None = None
+    msisdn: str | None = None
+
+
+class QuickCustomerRequest(BaseModel):
+    business_name: str
+    tax_id: str | None = None
+    address: str | None = None
 
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
@@ -585,6 +706,139 @@ def serialize_import(item: WindTreImport) -> dict[str, Any]:
     }
 
 
+PRODUCT_COLUMN_ALIASES = {
+    "sku": {"CODICE", "CODICE_ARTICOLO", "SKU", "ARTICOLO"},
+    "name": {"NOME", "NOME_PRODOTTO", "DESCRIZIONE", "DESCRIZIONE_COMMERCIALE"},
+    "unit_cost": {"COSTO", "COSTO_UNITARIO", "PREZZO_ACQUISTO"},
+}
+SIM_COLUMN_ALIASES = {
+    "iccid": {"ICCID", "SERIALE", "SERIALE_SIM"},
+    "sku": {"CODICE", "CODICE_ARTICOLO", "SKU", "ARTICOLO"},
+    "status": {"STATO", "STATO_SIM"},
+    "order_number": {"ORDINE", "ID_ORDINE", "NUMERO_ORDINE"},
+    "msisdn": {"MSISDN", "NUMERO", "NUMERO_TELEFONICO"},
+}
+SIM_STATUSES = {"IN_MAGAZZINO", "ASSEGNATA", "ATTIVATA", "DISABILITATA", "SOSPESA"}
+ORDER_STATUSES = {"INVIATO", "IN_ATTESA", "IN_LAVORAZIONE", "RICEVUTO", "EVASO"}
+
+
+def parse_uploaded_table(filename: str, contents: bytes) -> list[dict[str, str]]:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".xlsx", ".xlsm"}:
+        workbook = load_workbook(BytesIO(contents), read_only=True, data_only=True)
+        sheet = workbook.active
+        values = sheet.iter_rows(values_only=True)
+        headers = [normalize_header(value) for value in next(values, [])]
+        return [
+            {
+                headers[index]: clean(value)
+                for index, value in enumerate(row)
+                if index < len(headers) and headers[index] and clean(value)
+            }
+            for row in values
+            if any(clean(value) for value in row)
+        ]
+    if suffix == ".csv":
+        decoded = None
+        for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                decoded = contents.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if decoded is None:
+            raise HTTPException(422, "Codifica CSV non riconosciuta")
+        sample = decoded[:65536]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,|\t")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(decoded.splitlines(), dialect=dialect)
+        return [
+            {normalize_header(key): clean(value) for key, value in row.items() if key and clean(value)}
+            for row in reader
+            if any(clean(value) for value in row.values())
+        ]
+    raise HTTPException(422, "Carica un file CSV, XLSX o XLSM")
+
+
+def mapped_value(row: dict[str, str], aliases: set[str]) -> str:
+    return next((row[key] for key in aliases if row.get(key)), "")
+
+
+def cents_from_value(value: Any) -> int | None:
+    parsed = parse_monthly_fee(value)
+    return round(parsed * 100) if clean(value) else None
+
+
+def serialize_product(item: Product) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "sku": item.sku,
+        "name": item.name,
+        "unit_cost": round(item.unit_cost_cents / 100, 2) if item.unit_cost_cents is not None else None,
+        "is_active": item.is_active,
+    }
+
+
+def serialize_order(item: SimOrder) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "order_number": item.order_number,
+        "order_date": item.order_date.isoformat(),
+        "supplier": item.supplier,
+        "status": item.status,
+        "notes": item.notes,
+        "lines": [
+            {
+                "id": str(line.id),
+                "product_id": str(line.product_id),
+                "sku": line.product.sku,
+                "product_name": line.product.name,
+                "quantity": line.quantity,
+                "description": line.description,
+            }
+            for line in item.lines
+        ],
+        "total_quantity": sum(line.quantity for line in item.lines),
+    }
+
+
+def serialize_inventory(item: SimInventory) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "iccid": item.iccid,
+        "product_id": str(item.product_id),
+        "sku": item.product.sku,
+        "product_name": item.product.name,
+        "order_id": str(item.order_id) if item.order_id else None,
+        "order_number": item.order.order_number if item.order else None,
+        "status": item.status,
+        "customer_id": str(item.customer_id) if item.customer_id else None,
+        "customer_name": item.customer.business_name if item.customer else None,
+        "msisdn": item.msisdn,
+        "created_at": item.created_at.isoformat(),
+    }
+
+
+def normalize_iccid(value: Any) -> str:
+    return re.sub(r"\D", "", clean(value))
+
+
+def order_share_text(item: SimOrder) -> str:
+    lines = [
+        f"ORDINE SIM {item.order_number}",
+        f"Data: {item.order_date.strftime('%d/%m/%Y')}",
+        f"Fornitore: {item.supplier or 'Non indicato'}",
+        "",
+    ]
+    lines.extend(f"- {line.product.sku} | {line.product.name}: {line.quantity} pz" for line in item.lines)
+    if item.notes:
+        lines.extend(["", f"Note: {item.notes}"])
+    lines.append(f"\nTotale: {sum(line.quantity for line in item.lines)} SIM")
+    return "\n".join(lines)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     seed()
@@ -699,6 +953,392 @@ async def upload_store_logo(file: UploadFile = File(...)):
             if previous_path.is_file():
                 previous_path.unlink()
         return serialize_store_settings(item)
+
+
+@app.get("/api/v1/products")
+def products(search: str = "", include_inactive: bool = False):
+    with SessionLocal() as db:
+        query = select(Product).order_by(Product.name)
+        if not include_inactive:
+            query = query.where(Product.is_active.is_(True))
+        if search.strip():
+            pattern = f"%{search.strip()}%"
+            query = query.where(or_(Product.sku.ilike(pattern), Product.name.ilike(pattern)))
+        items = db.scalars(query).all()
+        costs = [item.unit_cost_cents for item in items if item.unit_cost_cents is not None]
+        return {
+            "items": [serialize_product(item) for item in items],
+            "total": len(items),
+            "average_cost": round(sum(costs) / len(costs) / 100, 2) if costs else 0,
+        }
+
+
+@app.post("/api/v1/products")
+def create_product(data: ProductRequest):
+    sku, name = data.sku.strip().upper(), data.name.strip()
+    if not sku or not name:
+        raise HTTPException(422, "Codice articolo e nome sono obbligatori")
+    with SessionLocal() as db:
+        if db.scalar(select(Product).where(Product.sku == sku)):
+            raise HTTPException(409, "Codice articolo già presente")
+        item = Product(sku=sku, name=name, unit_cost_cents=cents_from_value(data.unit_cost))
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_product(item)
+
+
+@app.put("/api/v1/products/{product_id}")
+def update_product(product_id: uuid.UUID, data: ProductRequest):
+    with SessionLocal() as db:
+        item = db.get(Product, product_id)
+        if not item:
+            raise HTTPException(404, "Prodotto non trovato")
+        sku, name = data.sku.strip().upper(), data.name.strip()
+        duplicate = db.scalar(select(Product).where(Product.sku == sku, Product.id != product_id))
+        if duplicate:
+            raise HTTPException(409, "Codice articolo già presente")
+        item.sku, item.name = sku, name
+        item.unit_cost_cents = cents_from_value(data.unit_cost)
+        item.is_active = True
+        db.commit()
+        return serialize_product(item)
+
+
+@app.delete("/api/v1/products/{product_id}")
+def delete_product(product_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(Product, product_id)
+        if not item:
+            raise HTTPException(404, "Prodotto non trovato")
+        item.is_active = False
+        db.commit()
+        return {"ok": True}
+
+
+@app.post("/api/v1/products/import")
+async def import_products(file: UploadFile = File(...)):
+    contents = await file.read()
+    rows = parse_uploaded_table(file.filename or "", contents)
+    added = updated = rejected = 0
+    errors = []
+    with SessionLocal() as db:
+        for index, row in enumerate(rows, 2):
+            sku = mapped_value(row, PRODUCT_COLUMN_ALIASES["sku"]).strip().upper()
+            name = mapped_value(row, PRODUCT_COLUMN_ALIASES["name"]).strip()
+            cost = mapped_value(row, PRODUCT_COLUMN_ALIASES["unit_cost"])
+            if not sku or not name:
+                rejected += 1
+                errors.append({"row": index, "error": "Codice o nome mancante"})
+                continue
+            item = db.scalar(select(Product).where(Product.sku == sku))
+            if item:
+                item.name = name
+                item.unit_cost_cents = cents_from_value(cost)
+                item.is_active = True
+                updated += 1
+            else:
+                db.add(Product(sku=sku, name=name, unit_cost_cents=cents_from_value(cost)))
+                added += 1
+        db.commit()
+    return {"added": added, "updated": updated, "rejected": rejected, "errors": errors[:50]}
+
+
+@app.get("/api/v1/sim-orders")
+def sim_orders():
+    with SessionLocal() as db:
+        return [serialize_order(item) for item in db.scalars(select(SimOrder).order_by(SimOrder.order_date.desc())).unique().all()]
+
+
+@app.post("/api/v1/sim-orders")
+def create_sim_order(data: SimOrderRequest):
+    if not data.lines:
+        raise HTTPException(422, "Inserisci almeno una riga d'ordine")
+    if data.status not in ORDER_STATUSES:
+        raise HTTPException(422, "Stato ordine non valido")
+    with SessionLocal() as db:
+        number = (data.order_number or "").strip().upper()
+        if not number:
+            year = data.order_date.year
+            sequence = (db.scalar(select(func.count()).select_from(SimOrder).where(
+                func.extract("year", SimOrder.order_date) == year
+            )) or 0) + 1
+            number = f"ORD-{year}-{sequence:03d}"
+        if db.scalar(select(SimOrder).where(SimOrder.order_number == number)):
+            raise HTTPException(409, "Numero ordine già presente")
+        products_by_id = {
+            item.id: item
+            for item in db.scalars(select(Product).where(Product.id.in_([line.product_id for line in data.lines]))).all()
+        }
+        if len(products_by_id) != len(set(line.product_id for line in data.lines)):
+            raise HTTPException(422, "Uno o più prodotti non esistono")
+        if any(line.quantity <= 0 for line in data.lines):
+            raise HTTPException(422, "Le quantità devono essere maggiori di zero")
+        item = SimOrder(
+            order_number=number,
+            order_date=data.order_date,
+            supplier=(data.supplier or "").strip() or None,
+            notes=(data.notes or "").strip() or None,
+            status=data.status,
+        )
+        db.add(item)
+        db.flush()
+        for line in data.lines:
+            db.add(SimOrderLine(
+                order_id=item.id,
+                product_id=line.product_id,
+                quantity=line.quantity,
+                description=(line.description or "").strip() or None,
+            ))
+        db.commit()
+        db.refresh(item)
+        return serialize_order(item)
+
+
+@app.patch("/api/v1/sim-orders/{order_id}/status")
+def update_sim_order_status(order_id: uuid.UUID, data: OrderStatusRequest):
+    if data.status not in ORDER_STATUSES:
+        raise HTTPException(422, "Stato ordine non valido")
+    with SessionLocal() as db:
+        item = db.get(SimOrder, order_id)
+        if not item:
+            raise HTTPException(404, "Ordine non trovato")
+        item.status = data.status
+        db.commit()
+        return serialize_order(item)
+
+
+@app.get("/api/v1/sim-orders/{order_id}/share")
+def share_sim_order(order_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(SimOrder, order_id)
+        if not item:
+            raise HTTPException(404, "Ordine non trovato")
+        return {"subject": f"Ordine SIM {item.order_number}", "text": order_share_text(item)}
+
+
+@app.get("/api/v1/sim-inventory")
+def sim_inventory(
+    search: str = "",
+    status: str | None = None,
+    product_id: uuid.UUID | None = None,
+    order_id: uuid.UUID | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+):
+    with SessionLocal() as db:
+        query = select(SimInventory).order_by(SimInventory.created_at.desc()).limit(limit)
+        if status:
+            query = query.where(SimInventory.status == status)
+        if product_id:
+            query = query.where(SimInventory.product_id == product_id)
+        if order_id:
+            query = query.where(SimInventory.order_id == order_id)
+        if search.strip():
+            pattern = f"%{search.strip()}%"
+            query = query.outerjoin(Customer).join(Product).outerjoin(SimOrder).where(or_(
+                SimInventory.iccid.ilike(pattern),
+                SimInventory.msisdn.ilike(pattern),
+                Customer.business_name.ilike(pattern),
+                Product.sku.ilike(pattern),
+                Product.name.ilike(pattern),
+                SimOrder.order_number.ilike(pattern),
+            ))
+        items = db.scalars(query).unique().all()
+        return [serialize_inventory(item) for item in items]
+
+
+@app.post("/api/v1/sim-inventory")
+def create_sim_inventory(data: SimInventoryRequest):
+    iccid = normalize_iccid(data.iccid)
+    if len(iccid) not in {19, 20}:
+        raise HTTPException(422, "L'ICCID deve contenere 19 o 20 cifre")
+    if data.status not in SIM_STATUSES:
+        raise HTTPException(422, "Stato SIM non valido")
+    with SessionLocal() as db:
+        if db.scalar(select(SimInventory).where(SimInventory.iccid == iccid)):
+            raise HTTPException(409, "ICCID già presente")
+        if not db.get(Product, data.product_id):
+            raise HTTPException(422, "Prodotto non trovato")
+        item = SimInventory(
+            iccid=iccid,
+            product_id=data.product_id,
+            order_id=data.order_id,
+            status=data.status,
+            customer_id=data.customer_id,
+            msisdn=normalize_iccid(data.msisdn) or None,
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return serialize_inventory(item)
+
+
+@app.patch("/api/v1/sim-inventory/{inventory_id}")
+def update_sim_inventory(inventory_id: uuid.UUID, data: SimInventoryUpdate):
+    with SessionLocal() as db:
+        item = db.get(SimInventory, inventory_id)
+        if not item:
+            raise HTTPException(404, "SIM non trovata")
+        if data.status is not None:
+            if data.status not in SIM_STATUSES:
+                raise HTTPException(422, "Stato SIM non valido")
+            item.status = data.status
+        item.customer_id = data.customer_id
+        item.msisdn = normalize_iccid(data.msisdn) or None
+        db.commit()
+        return serialize_inventory(item)
+
+
+@app.post("/api/v1/sim-inventory/import")
+async def import_sim_inventory(
+    file: UploadFile = File(...),
+    product_sku: str | None = Form(None),
+    order_number: str | None = Form(None),
+    default_status: str = Form("IN_MAGAZZINO"),
+):
+    if default_status not in SIM_STATUSES:
+        raise HTTPException(422, "Stato SIM non valido")
+    contents = await file.read()
+    rows = parse_uploaded_table(file.filename or "", contents)
+    added = updated = rejected = 0
+    errors = []
+    with SessionLocal() as db:
+        for index, row in enumerate(rows, 2):
+            iccid = normalize_iccid(mapped_value(row, SIM_COLUMN_ALIASES["iccid"]))
+            sku = (mapped_value(row, SIM_COLUMN_ALIASES["sku"]) or product_sku or "").strip().upper()
+            status = normalize_header(mapped_value(row, SIM_COLUMN_ALIASES["status"]) or default_status)
+            source_order = (mapped_value(row, SIM_COLUMN_ALIASES["order_number"]) or order_number or "").strip().upper()
+            msisdn = normalize_iccid(mapped_value(row, SIM_COLUMN_ALIASES["msisdn"])) or None
+            product = db.scalar(select(Product).where(Product.sku == sku))
+            order = db.scalar(select(SimOrder).where(SimOrder.order_number == source_order)) if source_order else None
+            if len(iccid) not in {19, 20} or not product or status not in SIM_STATUSES:
+                rejected += 1
+                errors.append({"row": index, "iccid": iccid, "error": "ICCID, prodotto o stato non valido"})
+                continue
+            item = db.scalar(select(SimInventory).where(SimInventory.iccid == iccid))
+            if item:
+                item.product_id = product.id
+                item.order_id = order.id if order else None
+                item.status = status
+                item.msisdn = msisdn
+                updated += 1
+            else:
+                db.add(SimInventory(
+                    iccid=iccid,
+                    product_id=product.id,
+                    order_id=order.id if order else None,
+                    status=status,
+                    msisdn=msisdn,
+                ))
+                added += 1
+        record = SimInventoryImport(
+            file_name=file.filename or "import",
+            added_count=added,
+            updated_count=updated,
+            rejected_count=rejected,
+            errors=errors[:100],
+        )
+        db.add(record)
+        db.commit()
+        return {
+            "id": str(record.id),
+            "added": added,
+            "updated": updated,
+            "rejected": rejected,
+            "errors": errors[:50],
+        }
+
+
+@app.get("/api/v1/sim-inventory/imports")
+def sim_inventory_import_history():
+    with SessionLocal() as db:
+        items = db.scalars(select(SimInventoryImport).order_by(SimInventoryImport.imported_at.desc()).limit(50)).all()
+        return [{
+            "id": str(item.id),
+            "file_name": item.file_name,
+            "added": item.added_count,
+            "updated": item.updated_count,
+            "rejected": item.rejected_count,
+            "errors": item.errors,
+            "imported_at": item.imported_at.isoformat(),
+        } for item in items]
+
+
+@app.get("/api/v1/sim-report")
+def sim_report():
+    with SessionLocal() as db:
+        inventory = db.scalars(select(SimInventory).order_by(SimInventory.created_at)).all()
+        orders = db.scalars(select(SimOrder).order_by(SimOrder.order_date.desc())).unique().all()
+        total = len(inventory)
+        available = sum(item.status == "IN_MAGAZZINO" for item in inventory)
+        grouped: dict[str, dict[str, Any]] = {}
+        for order in orders:
+            group = grouped[str(order.id)] = {
+                "order_id": str(order.id),
+                "order_number": order.order_number,
+                "order_date": order.order_date.isoformat(),
+                "status": order.status,
+                "products": {},
+            }
+            for line in order.lines:
+                group["products"][str(line.product_id)] = {
+                    "product_id": str(line.product_id),
+                    "sku": line.product.sku,
+                    "product_name": line.product.name,
+                    "ordered": line.quantity,
+                    "total": 0,
+                    "available": 0,
+                }
+        for item in inventory:
+            key = str(item.order_id) if item.order_id else "NO_ORDER"
+            group = grouped.setdefault(key, {
+                "order_id": None,
+                "order_number": "SENZA ORDINE",
+                "order_date": None,
+                "status": None,
+                "products": {},
+            })
+            product = group["products"].setdefault(str(item.product_id), {
+                "product_id": str(item.product_id),
+                "sku": item.product.sku,
+                "product_name": item.product.name,
+                "ordered": 0,
+                "total": 0,
+                "available": 0,
+            })
+            product["total"] += 1
+            product["available"] += item.status == "IN_MAGAZZINO"
+        return {
+            "total": total,
+            "available": available,
+            "assigned": total - available,
+            "assignment_rate": round((total - available) / total * 100, 1) if total else 0,
+            "orders": [
+                {**group, "products": list(group["products"].values())}
+                for group in grouped.values()
+            ],
+        }
+
+
+@app.post("/api/v1/customers")
+def quick_create_customer(data: QuickCustomerRequest):
+    name = data.business_name.strip()
+    if not name:
+        raise HTTPException(422, "Ragione sociale obbligatoria")
+    with SessionLocal() as db:
+        tax_id = (data.tax_id or "").strip() or None
+        if tax_id and db.scalar(select(Customer).where(Customer.tax_id == tax_id)):
+            raise HTTPException(409, "Cliente già presente")
+        item = Customer(
+            business_name=name,
+            tax_id=tax_id,
+            address=(data.address or "").strip() or None,
+            segment="MICROBUSINESS",
+            portfolio_status="ACTIVE",
+        )
+        db.add(item)
+        db.commit()
+        return {"id": str(item.id), "business_name": item.business_name}
 
 
 @app.get("/api/v1/dashboard/summary")

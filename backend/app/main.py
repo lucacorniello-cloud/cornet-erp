@@ -25,6 +25,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
@@ -157,6 +158,24 @@ class IncentiveActivation(Base):
     status: Mapped[str] = mapped_column(String(30), default="VALID", index=True)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class IncentivePdcImport(Base):
+    __tablename__ = "incentive_pdc_imports"
+    __table_args__ = (
+        UniqueConstraint("competition_id", "file_sha256", name="uq_incentive_pdc_import_file"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    competition_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incentive_competitions.id", ondelete="CASCADE"), index=True)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    file_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    stored_path: Mapped[str] = mapped_column(String(500))
+    document_type: Mapped[str] = mapped_column(String(80), default="WINDTRE_PDC")
+    status: Mapped[str] = mapped_column(String(30), default="IMPORTED")
+    extracted_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    activation_ids: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class WindTreImport(Base):
@@ -1332,6 +1351,135 @@ def march_2026_incentive_configuration() -> dict[str, Any]:
     }
 
 
+def pdf_document_text(contents: bytes) -> str:
+    try:
+        reader = PdfReader(BytesIO(contents))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as exc:
+        raise HTTPException(422, f"Impossibile leggere il PDF: {exc}") from exc
+
+
+def regex_value(text: str, pattern: str, flags: int = re.IGNORECASE) -> str:
+    match = re.search(pattern, text, flags)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def parsed_date(value: str) -> date | None:
+    for pattern in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value.strip(), pattern).date()
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
+def format_date_it(value: str | None) -> str:
+    parsed = parsed_date(value or "")
+    return parsed.strftime("%d/%m/%Y") if parsed else (value or "")
+
+
+def pdc_reload_base_bonus(device_price: float) -> float:
+    if device_price < 150:
+        return 5.0
+    if device_price < 300:
+        return 8.0
+    if device_price < 500:
+        return 10.0
+    if device_price < 700:
+        return 11.0
+    return 14.0
+
+
+def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
+    text = pdf_document_text(contents)
+    upper = text.upper()
+    if "PROPOSTA DI CONTRATTO WINDTRE" not in upper:
+        raise HTTPException(422, "Il documento non è stato riconosciuto come PDC WINDTRE")
+    first_name = regex_value(text, r"Cognome:\s*[A-ZÀ-Ý' ]+\s+Nome:\s*([A-ZÀ-Ý' ]+?)\s+Sesso:")
+    last_name = regex_value(text, r"Cognome:\s*([A-ZÀ-Ý' ]+?)\s+Nome:")
+    fiscal_code = regex_value(text, r"Codice Fiscale:\s*([A-Z0-9]{16})")
+    birth_date_text = regex_value(text, r"Data di nascita:\s*(\d{2}/\d{2}/\d{4})")
+    activation_date_text = regex_value(text, r"(?:^|\n)Data:\s*(\d{2}/\d{2}/\d{4})")
+    phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(text, r"(?:N\.\s*Telefono|Numero di telefono):\s*(\+?\d{9,15})")))
+    iccid = regex_value(text, r"(?:Seriale SIM \(ICCID\)|Numero della SIM):\s*(\d{19,20})")
+    customer_code = regex_value(text, r"Codice Cliente:\s*([A-Z0-9.]+)")
+    contract_code = regex_value(text, r"Codice Contratto:\s*([A-Z0-9.]+)")
+    dealer_code = regex_value(text, r"(?:Codice Rivenditore|Codice Dealer):\s*([A-Z0-9.]+)")
+    plan = regex_value(text, r"Piano Telefonico:\s*(.+?)\s*(?:\n|Opzioni/servizi:)")
+    options = regex_value(text, r"Opzioni/servizi:\s*(.+?)\s*\n")
+    imei = regex_value(text, r"Numero IMEI:\s*(\d{15})")
+    device_model = regex_value(text, r"Modello:\s*(.+?)\s*(?:\n|Data di acquisto:)")
+    device_price = parse_monthly_fee(regex_value(text, r"Prezzo device:\s*([\d.,]+)\s*euro"))
+    upfront = parse_monthly_fee(regex_value(text, r"Anticipo:\s*([\d.,]+)\s*euro"))
+    installments = int(regex_value(text, r"Durata Rateizzazione:\s*(\d+)") or 0)
+    installment_amount = parse_monthly_fee(regex_value(text, r"\d+\s*rate da\s*([\d.,]+)\s*euro"))
+    reload_active = "DATI DEL SERVIZIO  SMARTPHONE RELOAD" in upper or "DATI DEL SERVIZIO SMARTPHONE RELOAD" in upper
+    reload_cost = parse_monthly_fee(regex_value(text, r"Costo servizio:\s*([\d.,]+)\s*€"))
+    payment_method = "SDD" if "ADDEBITO DIRETTO SU C/C" in upper else "ALTRO"
+    address = regex_value(text, r"Residenza:\s*(.+?)\s+Provincia:")
+    postal_code = regex_value(text, r"CAP:\s*(\d{5})")
+    city = regex_value(text, r"Comune:\s*([A-ZÀ-Ý' ]+?)\s+Nazione:")
+    email = regex_value(text, r"Email:\s*([^\s]+@[^\s]+)")
+    document_type = regex_value(text, r"Documento d'Identità:\s*([^;]+);")
+    document_number = regex_value(text, r"Numero:\s*([A-Z0-9]+)\s+Data Rilascio:")
+    issue_date_text = regex_value(text, r"Data Rilascio:\s*(\d{2}/\d{2}/\d{4})")
+    activation_date = parsed_date(activation_date_text)
+    is_piva = bool(regex_value(text, r"Partita Iva/Cod\.Fiscale Azienda:\s*([A-Z0-9]+)"))
+    proposed_entries = []
+    if imei:
+        proposed_entries.append({
+            "track": "CUSTOMER_BASE", "label": "Telefono Incluso - vendita a rate",
+            "offer": f"Telefono Incluso · {device_model}", "direct_bonus": 8.0,
+            "monthly_fee": 0, "points": 1,
+            "attributes": {"device_sale": True, "phone_included": True, "piva": is_piva, "payment_type": "VAR"},
+        })
+    if reload_active:
+        proposed_entries.append({
+            "track": "RELOAD", "label": "Smartphone Reload",
+            "offer": f"Smartphone Reload · {device_model}", "direct_bonus": pdc_reload_base_bonus(device_price),
+            "monthly_fee": 0, "points": 1,
+            "attributes": {"reload_service": True, "device_sale": False, "device_price": device_price, "reload_cost": reload_cost},
+        })
+    warnings = []
+    if not activation_date:
+        warnings.append("Data di attivazione non rilevata")
+    if not fiscal_code:
+        warnings.append("Codice fiscale non rilevato")
+    if not customer_code:
+        warnings.append("Codice cliente non rilevato")
+    if not plan or plan.upper() in {"WIND BASIC", "NEW BASIC"}:
+        warnings.append("La PDC non espone un'offerta mobile ricorrente remunerabile: non viene creata automaticamente una nuova attivazione Mobile")
+    return {
+        "document_type": "WINDTRE_PDC_DEVICE_RELOAD" if reload_active else "WINDTRE_PDC",
+        "file_name": file_name,
+        "customer": {
+            "first_name": first_name.title(), "last_name": last_name.title(),
+            "business_name": f"{first_name.title()} {last_name.title()}".strip(),
+            "fiscal_code": fiscal_code, "segment": "CONSUMER", "birth_date": birth_date_text,
+            "address": address.title(), "postal_code": postal_code, "city": city.title(),
+            "email": email, "document_type": document_type, "document_number": document_number,
+            "document_issue_date": issue_date_text,
+        },
+        "contract": {
+            "operator": "WINDTRE", "market": "CONSUMER", "customer_code": customer_code,
+            "contract_code": contract_code, "activation_date": activation_date.isoformat() if activation_date else None,
+            "dealer_code": dealer_code, "phone": phone, "iccid": iccid, "plan": plan,
+            "options": options, "payment_method": payment_method,
+        },
+        "device": {
+            "imei": imei, "model": device_model, "price": device_price, "upfront": upfront,
+            "installments": installments, "installment_amount": installment_amount,
+            "reload_active": reload_active, "reload_cost": reload_cost,
+        },
+        "classification": {
+            "new_mobile_activation": False,
+            "reason": "PDC con vendita a rate/Reload su linea esistente; classificata Customer Base salvo verifica operatore",
+        },
+        "proposed_entries": proposed_entries,
+        "warnings": warnings,
+    }
+
+
 def serialize_incentive_competition(item: IncentiveCompetition) -> dict[str, Any]:
     return {
         "id": str(item.id), "name": item.name, "operator": item.operator, "market": item.market,
@@ -1400,7 +1548,9 @@ def incentive_report(db, competition: IncentiveCompetition) -> dict[str, Any]:
     for item in activations:
         points_by_track[item.track] += incentive_activation_points(item)
     reload_events = [item for item in activations if item.track == "RELOAD" and item.status == "VALID"]
-    reload_device_total = sum(max(1, int((item.attributes or {}).get("device_total", 1))) for item in reload_events)
+    reload_device_total = sum(1 for item in activations if item.status == "VALID" and (item.attributes or {}).get("device_sale"))
+    if not reload_device_total:
+        reload_device_total = sum(max(1, int((item.attributes or {}).get("device_total", 1))) for item in reload_events)
     reload_rate = (len(reload_events) / reload_device_total * 100) if reload_device_total else 0
     rows = []
     commissioning_total = 0.0
@@ -3387,6 +3537,226 @@ def create_incentive_activation(competition_id: uuid.UUID, data: IncentiveActiva
         db.commit()
         db.refresh(item)
         return serialize_incentive_activation(item)
+
+
+@app.post("/api/v1/incentives/{competition_id}/pdc/preview")
+async def preview_incentive_pdc(competition_id: uuid.UUID, file: UploadFile = File(...)):
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(422, "Carica una PDC in formato PDF")
+    contents = await file.read()
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        parsed = parse_windtre_pdc(contents, file.filename or "PDC.pdf")
+        fiscal_code = parsed["customer"]["fiscal_code"]
+        customer = db.scalar(select(Customer).where(Customer.fiscal_code == fiscal_code)) if fiscal_code else None
+        parsed["customer_match"] = {
+            "found": bool(customer), "customer_id": str(customer.id) if customer else None,
+            "customer_name": customer.business_name if customer else None,
+        }
+        parsed["file_sha256"] = sha256(contents).hexdigest()
+        parsed["duplicate"] = bool(db.scalar(
+            select(IncentivePdcImport).where(
+                IncentivePdcImport.competition_id == competition_id,
+                IncentivePdcImport.file_sha256 == parsed["file_sha256"],
+            )
+        ))
+        if parsed["contract"]["dealer_code"] and competition.dealer_code and parsed["contract"]["dealer_code"] != competition.dealer_code:
+            parsed["warnings"].append(
+                f"Codice dealer PDC {parsed['contract']['dealer_code']} diverso dalla gara {competition.dealer_code}"
+            )
+        return parsed
+
+
+@app.post("/api/v1/incentives/{competition_id}/pdc/import")
+async def import_incentive_pdc(
+    competition_id: uuid.UUID,
+    file: UploadFile = File(...),
+    seller_name: str | None = Form(None),
+    include_mobile: bool = Form(False),
+):
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(422, "Carica una PDC in formato PDF")
+    contents = await file.read()
+    digest = sha256(contents).hexdigest()
+    parsed = parse_windtre_pdc(contents, file.filename or "PDC.pdf")
+    activation_date = date.fromisoformat(parsed["contract"]["activation_date"]) if parsed["contract"]["activation_date"] else None
+    if not activation_date:
+        raise HTTPException(422, "Data di attivazione non rilevata: completa la verifica prima di importare")
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        if not competition:
+            raise HTTPException(404, "Gara non trovata")
+        if not competition.start_date <= activation_date <= competition.end_date:
+            raise HTTPException(422, "La data della PDC non rientra nel periodo della gara selezionata")
+        duplicate = db.scalar(
+            select(IncentivePdcImport).where(
+                IncentivePdcImport.competition_id == competition_id,
+                IncentivePdcImport.file_sha256 == digest,
+            )
+        )
+        if duplicate:
+            raise HTTPException(409, "Questa PDC è già stata importata nella gara")
+        customer_data = parsed["customer"]
+        customer = db.scalar(select(Customer).where(Customer.fiscal_code == customer_data["fiscal_code"]))
+        if not customer:
+            customer = Customer(
+                segment="CONSUMER", business_name=customer_data["business_name"],
+                first_name=customer_data["first_name"] or None, last_name=customer_data["last_name"] or None,
+                fiscal_code=customer_data["fiscal_code"] or None, phone=parsed["contract"]["phone"] or None,
+                email=customer_data["email"] or None, address=customer_data["address"] or None,
+                postal_code=customer_data["postal_code"] or None, city=customer_data["city"] or None,
+                birth_date=parsed_date(customer_data["birth_date"]), document_type=customer_data["document_type"] or None,
+                document_number=customer_data["document_number"] or None,
+                document_issue_date=parsed_date(customer_data["document_issue_date"]),
+                portfolio_status="ACTIVE",
+            )
+            db.add(customer)
+            db.flush()
+        else:
+            for field, value in (
+                ("first_name", customer_data["first_name"]), ("last_name", customer_data["last_name"]),
+                ("phone", parsed["contract"]["phone"]), ("email", customer_data["email"]),
+                ("address", customer_data["address"]), ("postal_code", customer_data["postal_code"]),
+                ("city", customer_data["city"]), ("document_type", customer_data["document_type"]),
+                ("document_number", customer_data["document_number"]),
+            ):
+                if value and not getattr(customer, field):
+                    setattr(customer, field, value)
+        code = parsed["contract"]["customer_code"]
+        if code and not db.scalar(
+            select(CustomerAccountCode).where(
+                CustomerAccountCode.operator == "WINDTRE",
+                CustomerAccountCode.market == "CONSUMER",
+                CustomerAccountCode.customer_code == code,
+            )
+        ):
+            db.add(CustomerAccountCode(
+                customer_id=customer.id, operator="WINDTRE", market="CONSUMER",
+                customer_code=code, is_primary=True,
+            ))
+        import_id = uuid.uuid4()
+        pdc_dir = UPLOAD_DIR / "pdc"
+        pdc_dir.mkdir(parents=True, exist_ok=True)
+        stored_path = pdc_dir / f"{import_id}.pdf"
+        stored_path.write_bytes(contents)
+        activation_ids = []
+        entries = list(parsed["proposed_entries"])
+        if include_mobile:
+            entries.insert(0, {
+                "track": "MOBILE", "label": "Nuova attivazione Mobile da PDC",
+                "offer": parsed["contract"]["plan"], "direct_bonus": 5.0 if parsed["device"]["imei"] else 0,
+                "monthly_fee": 0, "attributes": {
+                    "mnp": False, "tied": parsed["contract"]["payment_method"] == "SDD",
+                    "piva": False, "phone_included": bool(parsed["device"]["imei"]),
+                    "device_sale": bool(parsed["device"]["imei"]), "classification_to_verify": True,
+                },
+                "status": "TO_VERIFY",
+            })
+        for index, entry in enumerate(entries):
+            activation = IncentiveActivation(
+                competition_id=competition_id, customer_id=customer.id, activation_date=activation_date,
+                source_type="PDC", source_key=f"PDC:{digest}:{entry['track']}:{index}",
+                seller_name=clean(seller_name) or None, track=entry["track"], offer=entry["offer"],
+                asset_number=parsed["contract"]["phone"], monthly_fee_cents=round(entry.get("monthly_fee", 0) * 100),
+                direct_bonus_cents=round(entry.get("direct_bonus", 0) * 100), attributes={
+                    **entry.get("attributes", {}), "contract_code": parsed["contract"]["contract_code"],
+                    "iccid": parsed["contract"]["iccid"], "imei": parsed["device"]["imei"],
+                    "customer_code": parsed["contract"]["customer_code"], "source_pdc_id": str(import_id),
+                }, status=entry.get("status", "VALID"),
+                notes=entry["label"],
+            )
+            db.add(activation)
+            db.flush()
+            activation_ids.append(str(activation.id))
+        record = IncentivePdcImport(
+            id=import_id, competition_id=competition_id, customer_id=customer.id,
+            file_name=file.filename or "PDC.pdf", file_sha256=digest,
+            stored_path=str(stored_path), document_type=parsed["document_type"],
+            status="IMPORTED", extracted_data=parsed, activation_ids=activation_ids,
+        )
+        db.add(record)
+        db.commit()
+        return {
+            "id": str(record.id), "customer_id": str(customer.id), "customer_name": customer.business_name,
+            "activation_ids": activation_ids, "entries_created": len(activation_ids),
+            "report_url": f"/api/v1/incentives/{competition_id}/pdc-imports/{record.id}/report.pdf",
+        }
+
+
+@app.get("/api/v1/incentives/{competition_id}/pdc-imports")
+def incentive_pdc_import_history(competition_id: uuid.UUID):
+    with SessionLocal() as db:
+        items = db.scalars(
+            select(IncentivePdcImport)
+            .where(IncentivePdcImport.competition_id == competition_id)
+            .order_by(IncentivePdcImport.imported_at.desc())
+        ).all()
+        return [{
+            "id": str(item.id), "file_name": item.file_name, "document_type": item.document_type,
+            "status": item.status, "customer_id": str(item.customer_id) if item.customer_id else None,
+            "customer_name": db.get(Customer, item.customer_id).business_name if item.customer_id and db.get(Customer, item.customer_id) else "",
+            "activation_ids": item.activation_ids, "extracted_data": item.extracted_data,
+            "imported_at": item.imported_at.isoformat(),
+            "report_url": f"/api/v1/incentives/{competition_id}/pdc-imports/{item.id}/report.pdf",
+        } for item in items]
+
+
+@app.get("/api/v1/incentives/{competition_id}/pdc-imports/{pdc_import_id}/report.pdf")
+def incentive_pdc_activation_report(competition_id: uuid.UUID, pdc_import_id: uuid.UUID):
+    with SessionLocal() as db:
+        competition = db.get(IncentiveCompetition, competition_id)
+        record = db.get(IncentivePdcImport, pdc_import_id)
+        if not competition or not record or record.competition_id != competition_id:
+            raise HTTPException(404, "Importazione PDC non trovata")
+        activation_ids = [uuid.UUID(value) for value in (record.activation_ids or [])]
+        activations = db.scalars(select(IncentiveActivation).where(IncentiveActivation.id.in_(activation_ids))).all() if activation_ids else []
+        full_report = incentive_report(db, competition)
+        report_rows = [row for row in full_report["activations"] if row["id"] in set(record.activation_ids or [])]
+        customer = db.get(Customer, record.customer_id) if record.customer_id else None
+        extracted = record.extracted_data or {}
+    stream = BytesIO()
+    document = SimpleDocTemplate(stream, pagesize=A4, leftMargin=16*mm, rightMargin=16*mm, topMargin=14*mm, bottomMargin=14*mm)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Report importazione attivazione PDC", styles["Title"]),
+        Paragraph(f"{competition.name} · Dealer {competition.dealer_code or 'non indicato'}", styles["Normal"]),
+        Spacer(1, 5*mm),
+    ]
+    contract = extracted.get("contract", {})
+    device = extracted.get("device", {})
+    customer_data = extracted.get("customer", {})
+    summary = [
+        ["Cliente", customer.business_name if customer else customer_data.get("business_name", "")],
+        ["Codice fiscale", customer_data.get("fiscal_code", "")],
+        ["Codice cliente", contract.get("customer_code", "")],
+        ["Codice contratto", contract.get("contract_code", "")],
+        ["Data attivazione", format_date_it(contract.get("activation_date"))],
+        ["Numero / ICCID", f"{contract.get('phone','')} · {contract.get('iccid','')}"],
+        ["Piano", contract.get("plan", "")],
+        ["Terminale", f"{device.get('model','')} · IMEI {device.get('imei','')}"],
+        ["Prezzo / rate", f"€ {device.get('price',0):.2f} · {device.get('installments',0)} rate"],
+        ["Pagamento", contract.get("payment_method", "")],
+    ]
+    table = Table(summary, colWidths=[44*mm, 132*mm])
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#EEF1F6")),("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#CCD3DE")),("VALIGN",(0,0),(-1,-1),"TOP"),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))
+    story.extend([table, Spacer(1, 6*mm), Paragraph("Quote generate", styles["Heading2"])])
+    quota_data = [["Pista", "Voce", "Punti", "Soglia", "Gettone base", "Commissione stimata"]]
+    row_by_id = {row["id"]: row for row in report_rows}
+    for activation in activations:
+        row = row_by_id.get(str(activation.id), {})
+        quota_data.append([
+            activation.track, activation.notes or activation.offer or "", row.get("points", 0),
+            row.get("threshold", "Non raggiunta"), f"€ {activation.direct_bonus_cents/100:.2f}",
+            f"€ {row.get('commission',0):.2f}",
+        ])
+    quota = Table(quota_data, repeatRows=1, colWidths=[28*mm,60*mm,18*mm,28*mm,25*mm,32*mm])
+    quota.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#18233A")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#CCD3DE")),("FONTSIZE",(0,0),(-1,-1),8),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F6F7F9")])]))
+    story.extend([quota, Spacer(1, 5*mm), Paragraph("Nota: la commissione è una stima basata sulla soglia complessiva attualmente raggiunta. Rimane soggetta alle verifiche WINDTRE su attivazione, rinnovi, silenza, MNP, storni e qualità.", styles["Normal"])])
+    document.build(story)
+    stream.seek(0)
+    return StreamingResponse(stream, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="Report_Attivazione_{contract.get("phone") or pdc_import_id}.pdf"'})
 
 
 @app.delete("/api/v1/incentives/{competition_id}/activations/{activation_id}")

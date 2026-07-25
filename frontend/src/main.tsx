@@ -1,9 +1,9 @@
 import React, {useEffect, useMemo, useState} from "react";
 import ReactDOM from "react-dom/client";
 import {
-  AlertTriangle, ArrowLeftRight, BriefcaseBusiness, Building2, CheckCircle2,
-  FileClock, FileSpreadsheet, History, LayoutDashboard, LogOut, Search,
-  Settings, Store, UploadCloud, Users, XCircle
+  AlertTriangle, BriefcaseBusiness, CheckCircle2,
+  CircleDollarSign, FileClock, FileSpreadsheet, History, LayoutDashboard, LogOut,
+  Search, Settings, Smartphone, Store, UploadCloud, Users, Wifi, XCircle, Zap
 } from "lucide-react";
 import "./style.css";
 
@@ -81,16 +81,27 @@ function Nav({active,icon,onClick,children}:{active:boolean;icon:React.ReactNode
 
 function Dashboard({openImports}:{openImports:()=>void}){
   const [s,setS]=useState<any>(null);
+  const [portfolio,setPortfolio]=useState<any>(null);
+  const [segment,setSegment]=useState("BUSINESS_SME");
   useEffect(()=>{fetch(API+"/dashboard/summary").then(r=>r.json()).then(setS)},[]);
+  useEffect(()=>{setPortfolio(null);fetch(API+"/dashboard/portfolio?segment="+segment).then(r=>r.json()).then(setPortfolio)},[segment]);
   const last=s?.last_import;
+  const segments=[
+    ["BUSINESS_SME","Business SME"],
+    ["CONSUMER","Consumer"],
+    ["MICROBUSINESS","Microbusiness"],
+    ["ENERGY","Energia"],
+  ];
   return <main className="page">
-    <div className="title"><div><small>CENTRO OPERATIVO</small><h1>Buongiorno, Luca.</h1><p>Portafoglio clienti e variazioni WINDTRE Business.</p></div><button className="new" onClick={openImports}><UploadCloud size={18}/>Importa estrazione</button></div>
+    <div className="title"><div><small>CENTRO OPERATIVO</small><h1>Dashboard portafoglio</h1><p>Una vista distinta per ciascun mercato e linea di servizio.</p></div>{segment==="BUSINESS_SME"&&<button className="new" onClick={openImports}><UploadCloud size={18}/>Importa estrazione</button>}</div>
+    <div className="segmenttabs">{segments.map(([value,label])=><button className={segment===value?"active":""} key={value} onClick={()=>setSegment(value)}>{label}</button>)}</div>
     <div className="status"><span></span><div><b>{last?"Ultima estrazione acquisita":"Pronto per la prima estrazione"}</b><p>{last?`${monthLabel(last.competence_month)} · ${last.customer_count} clienti · ${last.row_count} righe`:"Carica il file Excel mensile del DB Tool WINDTRE"}</p></div></div>
-    <div className="kpis">
-      <Card icon={<Users/>} label="Clienti CRM" value={s?.customers}/>
-      <Card icon={<Building2/>} label="Clienti SME importati" value={last?.customer_count??0}/>
-      <Card icon={<ArrowLeftRight/>} label="Variazioni rilevate" value={last?(last.field_changes+last.campaign_changes):0}/>
-      <Card icon={<AlertTriangle/>} label="Non più presenti" value={last?.missing_customers??0}/>
+    <div className="portfolioKpis">
+      <PortfolioCard tone="blue" icon={<Users/>} label="Clienti selezionati" value={portfolio?.customers??0}/>
+      <PortfolioCard tone="green" icon={<Smartphone/>} label="Mobile" value={portfolio?.mobile?.count??0} amount={portfolio?.mobile?.mrr}/>
+      <PortfolioCard tone="purple" icon={<Wifi/>} label="Fisso / Dati" value={portfolio?.fixed_data?.count??0} amount={portfolio?.fixed_data?.mrr}/>
+      <PortfolioCard tone="cyan" icon={<Zap/>} label="Altri servizi" value={portfolio?.other_services?.count??0} amount={portfolio?.other_services?.mrr}/>
+      <PortfolioCard tone="gold" icon={<CircleDollarSign/>} label="Totale Canone (MRR)" value={formatCurrency(portfolio?.total_mrr??0)}/>
     </div>
     <div className="grid">
       <article><h2>Monitoraggio mensile</h2>{last?<div className="metriclist">
@@ -102,6 +113,10 @@ function Dashboard({openImports}:{openImports:()=>void}){
       <article><h2>Controlli consigliati</h2><p>Clienti assenti dall’ultima estrazione</p><p>Variazioni piano e canone</p><p>Ingressi e uscite dalle campagne</p></article>
     </div>
   </main>;
+}
+
+function PortfolioCard({label,value,amount,icon,tone}:{label:string;value:any;amount?:number;icon:React.ReactNode;tone:string}){
+  return <article className={"portfolioCard "+tone}><div><span>{label}</span><div className="portfolioValue"><strong>{value}</strong>{amount!==undefined&&<b>{formatCurrency(amount)}</b>}</div></div><div className="portfolioIcon">{icon}</div></article>
 }
 
 function Customers(){
@@ -279,7 +294,6 @@ function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
   </main>
 }
 
-function Card({label,value,icon}:{label:string;value:any;icon?:React.ReactNode}){return <article className="card">{icon}<span>{label}</span><strong>{value??"—"}</strong><small>Aggiornato ora</small></article>}
 function Metric({label,value,tone}:{label:string;value:number;tone:string}){return <div className="metric"><span className={tone}></span><b>{label}</b><strong>{value}</strong></div>}
 function Empty({icon,text}:{icon:React.ReactNode;text:string}){return <div className="empty">{icon}<b>{text}</b><span>Il contenuto sarà aggiornato automaticamente.</span></div>}
 function Status({value}:{value:string}){return <span className={"badge "+(value==="ACTIVE"?"active":"missing")}>{value==="ACTIVE"?"Presente":"Da verificare"}</span>}

@@ -39,6 +39,23 @@
 .status{margin:22px 0;display:flex;gap:12px;align-items:center;padding:15px 18px;border-radius:14px;color:#fff;background:radial-gradient(circle at 75% 0,#7262ef44,transparent 38%),linear-gradient(120deg,#1a2039,#29225a)}
 .status>span{width:9px;height:9px;border-radius:50%;background:#4ed39a;box-shadow:0 0 0 5px #4ed39a22}
 .status p{margin:3px 0 0;color:#bcc3d8;font-size:12px}
+.segmenttabs{display:flex;gap:7px;margin-top:22px;overflow:auto;padding-bottom:2px}
+.segmenttabs button{border:1px solid #dfe3eb;background:#fff;color:#697286;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:750;white-space:nowrap}
+.segmenttabs button.active{background:#1b2035;color:#fff;border-color:#1b2035;box-shadow:0 5px 14px #1b203524}
+.portfolioKpis{display:grid;grid-template-columns:1fr 1.15fr 1.15fr 1.15fr 1.35fr;gap:14px}
+.portfolioCard{min-height:128px;border-radius:17px;padding:21px 18px;background:#17191f;color:#f7f7fa;border:1px solid #2c2f37;display:flex;align-items:center;justify-content:space-between;gap:12px;box-shadow:0 9px 28px #17191f12}
+.portfolioCard>div:first-child{min-width:0}
+.portfolioCard span{display:block;color:#aaaab3;font-weight:750;font-size:13px;margin-bottom:12px}
+.portfolioValue{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.portfolioValue strong{font-size:29px;letter-spacing:-.7px;white-space:nowrap}
+.portfolioValue b{font-size:14px;white-space:nowrap}
+.portfolioIcon{width:49px;height:49px;border-radius:12px;display:grid;place-items:center;flex:none}
+.portfolioIcon svg{width:24px}
+.portfolioCard.blue .portfolioIcon{color:#59a2ff;background:#142844}.portfolioCard.blue .portfolioValue b{color:#59a2ff}
+.portfolioCard.green .portfolioIcon{color:#16d6a0;background:#0c352d}.portfolioCard.green .portfolioValue b{color:#16d6a0}
+.portfolioCard.purple .portfolioIcon{color:#7e85ff;background:#24243f}.portfolioCard.purple .portfolioValue b{color:#7e85ff}
+.portfolioCard.cyan .portfolioIcon{color:#43c6dc;background:#14343b}.portfolioCard.cyan .portfolioValue b{color:#43c6dc}
+.portfolioCard.gold .portfolioIcon{color:#f3b000;background:#382b0e}.portfolioCard.gold .portfolioValue b{color:#f3b000}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:15px}
 .card,.grid article,.tablecard,.uploadcard,.explain{background:#fff;border:1px solid #e3e7ee;border-radius:16px;padding:19px;box-shadow:0 7px 22px #1f273c0a}
 .card svg{color:#6d5dfc}
@@ -175,3 +192,5 @@
 .formactions{display:flex;justify-content:flex-end;margin-top:20px}
 .formactions .new{border:0}
 @media(max-width:850px){.settingsgrid{grid-template-columns:1fr}.logocard{position:static}.fieldgrid{grid-template-columns:1fr}}
+@media(max-width:1250px){.portfolioKpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){.portfolioKpis{grid-template-columns:1fr}.portfolioCard{min-height:105px}}

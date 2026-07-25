@@ -3,7 +3,15 @@ import unittest
 
 from openpyxl import Workbook
 
-from app.main import asset_details, build_preview, find_activation_date, parse_monthly_fee, parse_workbook
+from app.main import (
+    WindTreImportRow,
+    asset_details,
+    build_preview,
+    classify_asset,
+    find_activation_date,
+    parse_monthly_fee,
+    parse_workbook,
+)
 
 
 class WindTreParserTests(unittest.TestCase):
@@ -94,6 +102,36 @@ class WindTreParserTests(unittest.TestCase):
             details,
             [{"key": "DT_ATTIVAZIONE_LINEA", "label": "Dt Attivazione Linea", "value": "01/07/2024"}],
         )
+
+    def test_classifies_mobile_fixed_and_other_assets(self):
+        mobile = WindTreImportRow(
+            row_number=1,
+            customer_key="C1",
+            asset_key="A1",
+            business_name="Cliente",
+            raw_data={"MSISDN": "3931111111", "CANONE_SIM": "10"},
+            campaigns={},
+        )
+        fixed = WindTreImportRow(
+            row_number=2,
+            customer_key="C1",
+            asset_key="A2",
+            business_name="Cliente",
+            raw_data={"CANONE_ACCESSO": "25"},
+            campaigns={},
+        )
+        other = WindTreImportRow(
+            row_number=3,
+            customer_key="C1",
+            asset_key="A3",
+            business_name="Cliente",
+            asset_type="Microsoft 365",
+            raw_data={"DES_PRODOTTO_MKP": "Microsoft 365"},
+            campaigns={},
+        )
+        self.assertEqual(classify_asset(mobile), "MOBILE")
+        self.assertEqual(classify_asset(fixed), "FIXED_DATA")
+        self.assertEqual(classify_asset(other), "OTHER")
 
 
 if __name__ == "__main__":

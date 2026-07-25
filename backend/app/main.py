@@ -326,6 +326,20 @@ def asset_details(raw_data: dict[str, Any] | None) -> list[dict[str, str]]:
     return details
 
 
+def classify_asset(row: WindTreImportRow) -> str:
+    raw = row.raw_data or {}
+    asset_type = normalize_header(row.asset_type or "")
+    if raw.get("MSISDN") or raw.get("CANONE_SIM") or any(
+        token in asset_type for token in ("MOBILE", "SIM", "MSISDN")
+    ):
+        return "MOBILE"
+    if raw.get("CANONE_LINEA") or raw.get("CANONE_ACCESSO") or any(
+        token in asset_type for token in ("FISSO", "DATI", "FIBRA", "FTTH", "FTTC", "FWA", "ACCESSO")
+    ):
+        return "FIXED_DATA"
+    return "OTHER"
+
+
 def find_header(sheet) -> tuple[int, list[str]]:
     best: tuple[int, int, list[str]] | None = None
     known = {item for values in ALIASES.values() for item in values}
@@ -581,6 +595,54 @@ def summary():
             "open_practices": (last_import.field_changes + last_import.campaign_changes) if last_import else 0,
             "monthly_value": 0,
             "last_import": serialize_import(last_import) if last_import else None,
+        }
+
+
+@app.get("/api/v1/dashboard/portfolio")
+def portfolio_summary(segment: str = "BUSINESS_SME"):
+    with SessionLocal() as db:
+        customers_query = select(func.count()).select_from(Customer).where(
+            Customer.segment == segment,
+            Customer.portfolio_status == "ACTIVE",
+        )
+        customer_count = db.scalar(customers_query) or 0
+        latest_import = db.scalar(
+            select(WindTreImport)
+            .order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc())
+            .limit(1)
+        )
+        rows = (
+            db.scalars(
+                select(WindTreImportRow)
+                .join(Customer, Customer.id == WindTreImportRow.customer_id)
+                .where(
+                    WindTreImportRow.import_id == latest_import.id,
+                    Customer.segment == segment,
+                )
+            ).all()
+            if latest_import
+            else []
+        )
+        totals = {
+            "MOBILE": {"count": 0, "mrr": 0.0},
+            "FIXED_DATA": {"count": 0, "mrr": 0.0},
+            "OTHER": {"count": 0, "mrr": 0.0},
+        }
+        for row in rows:
+            category = classify_asset(row)
+            totals[category]["count"] += 1
+            totals[category]["mrr"] = round(
+                totals[category]["mrr"] + parse_monthly_fee(row.monthly_fee),
+                2,
+            )
+        return {
+            "segment": segment,
+            "competence_month": latest_import.competence_month if latest_import else None,
+            "customers": customer_count,
+            "mobile": totals["MOBILE"],
+            "fixed_data": totals["FIXED_DATA"],
+            "other_services": totals["OTHER"],
+            "total_mrr": round(sum(item["mrr"] for item in totals.values()), 2),
         }
 
 

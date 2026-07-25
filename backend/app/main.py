@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from collections import defaultdict
+from copy import copy
 import csv
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
@@ -339,6 +340,20 @@ class TerminalInventoryMetadata(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Quote(Base):
+    __tablename__ = "quotes"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    quote_type: Mapped[str] = mapped_column(String(40), default="CONFIGURATORE", index=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(30), default="GENERATO", index=True)
+    line_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_mrr_cents: Mapped[int] = mapped_column(Integer, default=0)
+    proposed_mrr_cents: Mapped[int] = mapped_column(Integer, default=0)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class DdtShipmentSim(Base):
     __tablename__ = "ddt_shipment_sims"
     ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
@@ -490,6 +505,10 @@ class TerminalCBRequest(BaseModel):
     upfront: float = 0
     monthly_installment: float = 0
     final_installment: float = 0
+
+
+class ConfiguratorRequest(BaseModel):
+    asset_keys: list[str]
 
 
 class WindTrePanelRequestCreate(BaseModel):
@@ -2993,6 +3012,173 @@ def customer_detail(customer_id: uuid.UUID):
                 for row in latest_rows[-100:]
             ],
         }
+
+
+def configurator_plan_type(row: WindTreImportRow) -> str | None:
+    return {
+        "MOBILE_VOICE": "VOCE",
+        "MOBILE_DATA": "DATI",
+        "MOBILE_M2M": "DATI_M2M",
+        "FIXED_DATA": "FISSO",
+    }.get(classify_asset(row))
+
+
+def configurator_proposal(db, row: WindTreImportRow) -> dict[str, Any]:
+    current_fee = parse_monthly_fee(row.monthly_fee)
+    raw = row.raw_data or {}
+    renewal = any("RINNOV" in normalize_header(name) and clean(value) for name, value in (row.campaigns or {}).items())
+    plan_type = configurator_plan_type(row)
+    candidate = None
+    if plan_type:
+        candidates = db.scalars(
+            select(TariffPlan)
+            .where(TariffPlan.plan_type == plan_type, TariffPlan.subscribable.is_(True))
+            .order_by(TariffPlan.monthly_fee_cents)
+        ).all()
+        if candidates:
+            candidate = min(
+                candidates,
+                key=lambda item: abs(((item.monthly_fee_cents + item.secure_web_cents) / 100) - current_fee),
+            )
+    if renewal:
+        proposed_plan = candidate.name if candidate else (row.current_plan or "Piano attuale")
+        proposed_fee = ((candidate.monthly_fee_cents + candidate.secure_web_cents) / 100) if candidate else current_fee
+        offer_type = "Rinnovo"
+    elif candidate and normalize_header(candidate.name) != normalize_header(row.current_plan):
+        proposed_plan = candidate.name
+        proposed_fee = (candidate.monthly_fee_cents + candidate.secure_web_cents) / 100
+        offer_type = "Cambio Piano"
+    else:
+        proposed_plan = row.current_plan or "Piano attuale"
+        proposed_fee = current_fee
+        offer_type = "Rinnovo Isopiano"
+    hardware = next(
+        (clean(raw.get(key)) for key in ("DESCRIZIONE_TERMINALE", "TERMINALE", "DEVICE", "MODELLO_TERMINALE") if clean(raw.get(key))),
+        "",
+    )
+    return {
+        "asset_key": row.asset_key,
+        "msisdn": row.asset_number or row.asset_key,
+        "line_type": classify_asset(row),
+        "current_plan": row.current_plan or "",
+        "current_fee": round(current_fee, 2),
+        "proposed_plan": proposed_plan,
+        "proposed_fee": round(proposed_fee, 2),
+        "offer_type": offer_type,
+        "activation_cost": round((candidate.activation_cost_cents / 100) if candidate else 0, 2),
+        "hardware": hardware,
+        "hardware_monthly": 0,
+        "hardware_final": 0,
+    }
+
+
+def configurator_workbook(customer: Customer, proposals: list[dict[str, Any]]) -> Workbook:
+    template = UPLOAD_DIR / "templates" / "template_configuratore.xlsx"
+    if template.exists():
+        workbook = load_workbook(template)
+    else:
+        workbook = Workbook()
+        first = workbook.active
+        first.title = "P1 - Proposta e Firma"
+        second = workbook.create_sheet("P2 - Condizioni Economiche")
+        first["B3"] = "PROPOSTA COMMERCIALE"
+        first["B3"].font = Font(size=18, bold=True, color="FFFFFF")
+        first["B3"].fill = PatternFill("solid", fgColor="292C3A")
+        first.merge_cells("B3:J4")
+        for cell, label in (("F20", "P.IVA / Codice fiscale"), ("F21", "Ragione sociale"), ("F22", "Sede commerciale")):
+            first[cell] = label
+            first[cell].font = Font(bold=True, color="626B7D")
+        headers = {
+            "B7": "MSISDN", "C7": "Piano attuale", "D7": "Costo attuale", "E7": "Proposta",
+            "G7": "Prezzo proposto", "I7": "Tipo offerta", "J7": "Costo attivazione",
+            "K7": "Terminale", "N7": "Rata mensile", "O7": "Rata finale",
+        }
+        for cell, value in headers.items():
+            second[cell] = value
+            second[cell].font = Font(bold=True, color="FFFFFF")
+            second[cell].fill = PatternFill("solid", fgColor="292C3A")
+        second.freeze_panes = "B8"
+    first = workbook["P1 - Proposta e Firma"]
+    second = workbook["P2 - Condizioni Economiche"]
+    first["H20"] = customer.tax_id or customer.fiscal_code or ""
+    first["H21"] = customer.business_name
+    first["H22"] = customer.address or ""
+    for index, proposal in enumerate(proposals, 8):
+        if index > 8:
+            for column in range(1, 16):
+                source = second.cell(8, column)
+                target = second.cell(index, column)
+                if source.has_style:
+                    target._style = copy(source._style)
+                target.number_format = source.number_format
+        values = {
+            2: proposal["msisdn"], 3: proposal["current_plan"], 4: proposal["current_fee"],
+            5: proposal["proposed_plan"], 7: proposal["proposed_fee"], 9: proposal["offer_type"],
+            10: proposal["activation_cost"], 11: proposal["hardware"],
+            14: proposal["hardware_monthly"], 15: proposal["hardware_final"],
+        }
+        for column, value in values.items():
+            second.cell(index, column, value)
+        for column in (4, 7, 10, 14, 15):
+            second.cell(index, column).number_format = '€ #,##0.00'
+    for column, width in {"B": 18, "C": 28, "D": 15, "E": 28, "G": 18, "I": 22, "J": 18, "K": 28, "N": 16, "O": 16}.items():
+        if second.column_dimensions[column].width is None or second.column_dimensions[column].width < width:
+            second.column_dimensions[column].width = width
+    return workbook
+
+
+@app.get("/api/v1/customers/{customer_id}/quotes")
+def customer_quotes(customer_id: uuid.UUID):
+    with SessionLocal() as db:
+        if not db.get(Customer, customer_id):
+            raise HTTPException(404, "Cliente non trovato")
+        items = db.scalars(select(Quote).where(Quote.customer_id == customer_id).order_by(Quote.created_at.desc())).all()
+        return [{
+            "id": str(item.id), "quote_type": item.quote_type, "file_name": item.file_name,
+            "status": item.status, "line_count": item.line_count,
+            "current_mrr": item.current_mrr_cents / 100, "proposed_mrr": item.proposed_mrr_cents / 100,
+            "created_at": item.created_at.isoformat(), "payload": item.payload,
+        } for item in items]
+
+
+@app.post("/api/v1/customers/{customer_id}/configurator.xlsx")
+def generate_customer_configurator(customer_id: uuid.UUID, data: ConfiguratorRequest):
+    if not data.asset_keys:
+        raise HTTPException(422, "Seleziona almeno una linea")
+    with SessionLocal() as db:
+        customer = db.get(Customer, customer_id)
+        if not customer:
+            raise HTTPException(404, "Cliente non trovato")
+        latest_import, rows = latest_customer_snapshot(db, customer_id)
+        selected = [row for row in rows if row.asset_key in set(data.asset_keys) and is_active_service(row)]
+        if not selected:
+            raise HTTPException(422, "Le linee selezionate non risultano attive nell’ultima estrazione")
+        proposals = [configurator_proposal(db, row) for row in selected]
+        workbook = configurator_workbook(customer, proposals)
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        safe_customer = re.sub(r"[^A-Za-z0-9]+", "_", customer.business_name).strip("_") or "Cliente"
+        line_label = re.sub(r"[^A-Za-z0-9]+", "_", proposals[0]["msisdn"]).strip("_") if len(proposals) == 1 else "Multi"
+        filename = f"Configuratore_{safe_customer}_{line_label}.xlsx"
+        quote = Quote(
+            customer_id=customer.id,
+            file_name=filename,
+            line_count=len(proposals),
+            current_mrr_cents=round(sum(item["current_fee"] for item in proposals) * 100),
+            proposed_mrr_cents=round(sum(item["proposed_fee"] for item in proposals) * 100),
+            payload={"snapshot_month": latest_import.competence_month if latest_import else None, "proposals": proposals},
+        )
+        db.add(quote)
+        db.commit()
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Quote-Id": str(quote.id),
+            },
+        )
 
 
 @app.get("/api/v1/customers/{customer_id}/services-pivot.xlsx")

@@ -33,7 +33,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -87,6 +87,25 @@ class Customer(Base):
     portfolio_status: Mapped[str] = mapped_column(String(40), default="ACTIVE")
     first_seen_month: Mapped[str | None] = mapped_column(String(7))
     last_seen_month: Mapped[str | None] = mapped_column(String(7))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class CustomerAccountCode(Base):
+    __tablename__ = "customer_account_codes"
+    __table_args__ = (
+        UniqueConstraint("operator", "market", "customer_code", name="uq_customer_account_code_market"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    operator: Mapped[str] = mapped_column(String(80), index=True)
+    market: Mapped[str] = mapped_column(String(40), index=True)
+    customer_code: Mapped[str] = mapped_column(String(80), index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -604,6 +623,13 @@ class QuickCustomerRequest(BaseModel):
     document_issuer: str | None = None
 
 
+class CustomerAccountCodeRequest(BaseModel):
+    operator: str = "WINDTRE"
+    market: str
+    customer_code: str
+    is_primary: bool = True
+
+
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -630,6 +656,17 @@ def clean(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def serialize_account_code(item: CustomerAccountCode) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "customer_id": str(item.customer_id),
+        "operator": item.operator,
+        "market": item.market,
+        "customer_code": item.customer_code,
+        "is_primary": item.is_primary,
+    }
 
 
 def normalize_header(value: Any) -> str:
@@ -2893,6 +2930,95 @@ def update_customer(customer_id: uuid.UUID, data: QuickCustomerRequest):
         return {"id": str(item.id), "business_name": item.business_name}
 
 
+@app.get("/api/v1/customers/{customer_id}/account-codes")
+def customer_account_codes(customer_id: uuid.UUID):
+    with SessionLocal() as db:
+        if not db.get(Customer, customer_id):
+            raise HTTPException(404, "Cliente non trovato")
+        items = db.scalars(
+            select(CustomerAccountCode)
+            .where(CustomerAccountCode.customer_id == customer_id)
+            .order_by(CustomerAccountCode.operator, CustomerAccountCode.market, CustomerAccountCode.customer_code)
+        ).all()
+        return [serialize_account_code(item) for item in items]
+
+
+@app.post("/api/v1/customers/{customer_id}/account-codes")
+def create_customer_account_code(customer_id: uuid.UUID, data: CustomerAccountCodeRequest):
+    operator = normalize_header(data.operator)
+    market = normalize_header(data.market)
+    customer_code = clean(data.customer_code).upper()
+    if not operator or not customer_code:
+        raise HTTPException(422, "Operatore e codice cliente sono obbligatori")
+    if market not in {"CONSUMER", "MICROBUSINESS", "BUSINESS_SME"}:
+        raise HTTPException(422, "Mercato non valido")
+    with SessionLocal() as db:
+        customer = db.get(Customer, customer_id)
+        if not customer:
+            raise HTTPException(404, "Cliente non trovato")
+        duplicate = db.scalar(
+            select(CustomerAccountCode).where(
+                CustomerAccountCode.operator == operator,
+                CustomerAccountCode.market == market,
+                CustomerAccountCode.customer_code == customer_code,
+            )
+        )
+        if duplicate:
+            if duplicate.customer_id != customer_id:
+                raise HTTPException(409, "Codice già associato a un altro cliente nello stesso mercato")
+            return serialize_account_code(duplicate)
+        if data.is_primary:
+            for item in db.scalars(
+                select(CustomerAccountCode).where(
+                    CustomerAccountCode.customer_id == customer_id,
+                    CustomerAccountCode.operator == operator,
+                    CustomerAccountCode.market == market,
+                )
+            ).all():
+                item.is_primary = False
+        item = CustomerAccountCode(
+            customer_id=customer_id,
+            operator=operator,
+            market=market,
+            customer_code=customer_code,
+            is_primary=data.is_primary,
+        )
+        db.add(item)
+        if operator == "WINDTRE" and market == "BUSINESS_SME":
+            customer.windtre_customer_code = customer_code
+        db.commit()
+        db.refresh(item)
+        return serialize_account_code(item)
+
+
+@app.delete("/api/v1/customers/{customer_id}/account-codes/{account_code_id}")
+def delete_customer_account_code(customer_id: uuid.UUID, account_code_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(CustomerAccountCode, account_code_id)
+        if not item or item.customer_id != customer_id:
+            raise HTTPException(404, "Codice cliente non trovato")
+        customer = db.get(Customer, customer_id)
+        clears_legacy = (
+            item.operator == "WINDTRE"
+            and item.market == "BUSINESS_SME"
+            and customer
+            and customer.windtre_customer_code == item.customer_code
+        )
+        db.delete(item)
+        if clears_legacy:
+            replacement = db.scalar(
+                select(CustomerAccountCode).where(
+                    CustomerAccountCode.customer_id == customer_id,
+                    CustomerAccountCode.operator == "WINDTRE",
+                    CustomerAccountCode.market == "BUSINESS_SME",
+                    CustomerAccountCode.id != account_code_id,
+                ).order_by(CustomerAccountCode.is_primary.desc(), CustomerAccountCode.created_at)
+            )
+            customer.windtre_customer_code = replacement.customer_code if replacement else None
+        db.commit()
+        return {"deleted": True}
+
+
 @app.get("/api/v1/dashboard/summary")
 def summary():
     with SessionLocal() as db:
@@ -2987,9 +3113,22 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                     Customer.windtre_customer_code.ilike(pattern),
                     Customer.email.ilike(pattern),
                     Customer.phone.ilike(pattern),
+                    Customer.id.in_(
+                        select(CustomerAccountCode.customer_id).where(
+                            CustomerAccountCode.customer_code.ilike(pattern)
+                        )
+                    ),
                 )
             )
         items = db.scalars(query).all()
+        codes_by_customer: dict[uuid.UUID, list[dict[str, Any]]] = defaultdict(list)
+        if items:
+            for code in db.scalars(
+                select(CustomerAccountCode)
+                .where(CustomerAccountCode.customer_id.in_([item.id for item in items]))
+                .order_by(CustomerAccountCode.operator, CustomerAccountCode.market, CustomerAccountCode.customer_code)
+            ).all():
+                codes_by_customer[code.customer_id].append(serialize_account_code(code))
         latest_import = db.scalar(
             select(WindTreImport)
             .order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc())
@@ -3019,6 +3158,7 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                 "tax_id": item.tax_id,
                 "fiscal_code": item.fiscal_code,
                 "windtre_customer_code": item.windtre_customer_code,
+                "account_codes": codes_by_customer.get(item.id, []),
                 "portfolio_status": item.portfolio_status,
                 "first_seen_month": item.first_seen_month,
                 "last_seen_month": item.last_seen_month,
@@ -3054,6 +3194,11 @@ def customer_detail(customer_id: uuid.UUID):
             else []
         )
         monthly_spend = round(sum(parse_monthly_fee(row.monthly_fee) for row in latest_rows), 2)
+        account_codes = db.scalars(
+            select(CustomerAccountCode)
+            .where(CustomerAccountCode.customer_id == customer_id)
+            .order_by(CustomerAccountCode.operator, CustomerAccountCode.market, CustomerAccountCode.customer_code)
+        ).all()
         imported_numbers = {clean(row.asset_number) for row in latest_rows if clean(row.asset_number)}
         inventory_sims = db.scalars(
             select(SimInventory).where(SimInventory.customer_id == customer_id).order_by(SimInventory.msisdn, SimInventory.iccid)
@@ -3082,6 +3227,7 @@ def customer_detail(customer_id: uuid.UUID):
             "tax_id": customer.tax_id,
             "fiscal_code": customer.fiscal_code,
             "windtre_customer_code": customer.windtre_customer_code,
+            "account_codes": [serialize_account_code(code) for code in account_codes],
             "email": customer.email,
             "phone": customer.phone,
             "address": customer.address,
@@ -3508,7 +3654,16 @@ async def import_windtre_file(competence_month: str = Form(...), file: UploadFil
         for row in parsed:
             customer = None
             if row["customer_code"]:
-                customer = db.scalar(select(Customer).where(Customer.windtre_customer_code == row["customer_code"]))
+                account_code = db.scalar(
+                    select(CustomerAccountCode).where(
+                        CustomerAccountCode.operator == "WINDTRE",
+                        CustomerAccountCode.market == "BUSINESS_SME",
+                        CustomerAccountCode.customer_code == row["customer_code"].upper(),
+                    )
+                )
+                customer = db.get(Customer, account_code.customer_id) if account_code else None
+                if not customer:
+                    customer = db.scalar(select(Customer).where(Customer.windtre_customer_code == row["customer_code"]))
             if not customer and row["tax_id"]:
                 customer = db.scalar(select(Customer).where(Customer.tax_id == row["tax_id"]))
             if not customer and row["fiscal_code"]:
@@ -3535,6 +3690,26 @@ async def import_windtre_file(competence_month: str = Form(...), file: UploadFil
                 customer.phone = row["phone"] or customer.phone
                 customer.last_seen_month = competence_month
                 customer.portfolio_status = "ACTIVE"
+            if row["customer_code"]:
+                normalized_code = row["customer_code"].upper()
+                account_code = db.scalar(
+                    select(CustomerAccountCode).where(
+                        CustomerAccountCode.operator == "WINDTRE",
+                        CustomerAccountCode.market == "BUSINESS_SME",
+                        CustomerAccountCode.customer_code == normalized_code,
+                    )
+                )
+                if not account_code:
+                    db.add(
+                        CustomerAccountCode(
+                            customer_id=customer.id,
+                            operator="WINDTRE",
+                            market="BUSINESS_SME",
+                            customer_code=normalized_code,
+                            is_primary=True,
+                        )
+                    )
+                    db.flush()
             customer_ids[row["customer_key"]] = customer.id
             current_by_asset[row["asset_key"]] = row
             db.add(

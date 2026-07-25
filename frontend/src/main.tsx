@@ -185,6 +185,27 @@ function Customers(){
 
 function CustomerDetail({item,close}:{item:any;close:()=>void}){
   const campaigns=Array.from(new Set((item.assets||[]).flatMap((asset:any)=>Object.keys(asset.campaigns||{}))));
+  const activeAssets=(item.assets||[]).filter((asset:any)=>!asset.status||["ATT","ACTIVE","ATTIVO","ATTIVA"].includes(String(asset.status).toUpperCase()));
+  const [selectedAssets,setSelectedAssets]=useState<string[]>([]);
+  const [quotes,setQuotes]=useState<any[]>([]);
+  const [configBusy,setConfigBusy]=useState(false);
+  const [configMessage,setConfigMessage]=useState("");
+  const loadQuotes=()=>fetch(`${API}/customers/${item.id}/quotes`).then(r=>r.json()).then(setQuotes);
+  useEffect(()=>{loadQuotes()},[item.id]);
+  function toggleAsset(key:string){setSelectedAssets(current=>current.includes(key)?current.filter(value=>value!==key):[...current,key])}
+  function toggleAll(){setSelectedAssets(selectedAssets.length===activeAssets.length?[]:activeAssets.map((asset:any)=>asset.asset_key))}
+  async function generateConfigurator(){
+    if(!selectedAssets.length)return;setConfigBusy(true);setConfigMessage("");
+    try{
+      const response=await fetch(`${API}/customers/${item.id}/configurator.xlsx`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({asset_keys:selectedAssets})});
+      if(!response.ok){const error=await response.json();throw new Error(error.detail||"Generazione non riuscita")}
+      const blob=await response.blob();const disposition=response.headers.get("content-disposition")||"";
+      const filename=disposition.match(/filename="?([^"]+)"?/)?.[1]||`Configuratore_${item.business_name}.xlsx`;
+      const url=URL.createObjectURL(blob);const link=document.createElement("a");link.href=url;link.download=filename;link.click();URL.revokeObjectURL(url);
+      setConfigMessage(`Configuratore generato per ${selectedAssets.length} linee.`);setSelectedAssets([]);loadQuotes();
+    }catch(error:any){setConfigMessage(error.message||"Generazione non riuscita")}
+    finally{setConfigBusy(false)}
+  }
   return <div className="overlay" onMouseDown={event=>{if(event.currentTarget===event.target)close()}}>
     <section className="drawer customerdrawer"><button className="close" onClick={close}>×</button>
       <small>CLIENTE BUSINESS SME</small><h2>{item.business_name}</h2>
@@ -194,7 +215,10 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
         <div><span>Fotografia portafoglio</span><b>{item.snapshot_month?monthLabel(item.snapshot_month):"—"}</b></div>
         <div className="spendfact"><span>Spesa mensile complessiva</span><b>{formatCurrency(item.monthly_spend)}</b></div>
       </div>
-      <div className="sectiontitle"><div><FileSpreadsheet/><h2>Utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
+      <div className="sectiontitle configuratorTitle"><div><FileSpreadsheet/><h2>Linee attive</h2></div><div>{selectedAssets.length>0&&<button className="new" disabled={configBusy} onClick={generateConfigurator}>{configBusy?<LoaderCircle/>:<FileSpreadsheet/>}{configBusy?"Generazione…":`Genera configuratore (${selectedAssets.length})`}</button>}<span>{activeAssets.length} linee</span></div></div>
+      {activeAssets.length>0&&<div className="activeLinesTable"><table><thead><tr><th><input type="checkbox" aria-label="Seleziona tutte le linee" checked={selectedAssets.length===activeAssets.length} onChange={toggleAll}/></th><th>MSISDN / ID</th><th>Tipo linea</th><th>Terminale / Hardware</th><th>Stato</th><th>Costo attuale</th></tr></thead><tbody>{activeAssets.map((asset:any)=><tr key={asset.asset_key} className={selectedAssets.includes(asset.asset_key)?"selected":""} onClick={()=>toggleAsset(asset.asset_key)}><td><input type="checkbox" checked={selectedAssets.includes(asset.asset_key)} onChange={()=>toggleAsset(asset.asset_key)} onClick={event=>event.stopPropagation()}/></td><td><b>{asset.asset_number||asset.asset_key}</b></td><td>{asset.asset_type||"Utenza"}</td><td>{asset.details?.find((detail:any)=>/TERMINALE|DEVICE/i.test(detail.label))?.value||"—"}</td><td><Status value={asset.status==="ACTIVE"?"ACTIVE":item.portfolio_status}/></td><td><b className="money">{asset.monthly_fee?formatCurrency(asset.monthly_fee):"—"}</b></td></tr>)}</tbody></table></div>}
+      {configMessage&&<div className={"notice "+(configMessage.startsWith("Configuratore")?"ok":"error")}>{configMessage.startsWith("Configuratore")?<CheckCircle2/>:<XCircle/>}{configMessage}</div>}
+      <div className="sectiontitle"><div><BriefcaseBusiness/><h2>Dettaglio utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
       <div className="exportactions">
         <a className="exportbtn excel" href={`${API}/customers/${item.id}/services-pivot.xlsx`}><FileSpreadsheet/>Pivot Excel</a>
         <a className="exportbtn pdf" href={`${API}/customers/${item.id}/services-pivot.pdf`}><FileText/>Pivot PDF</a>
@@ -206,6 +230,8 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
         {Object.keys(asset.campaigns||{}).length>0&&<div className="campaignchips">{Object.entries(asset.campaigns).map(([name,value]:any)=><span key={name}><b>{name}</b> {value}</span>)}</div>}
       </article>)}</div>:<Empty icon={<FileSpreadsheet/>} text="Nessuna utenza nell’ultima estrazione"/>}
       {campaigns.length>0&&<p className="previewnote">{campaigns.length} campagne distinte rilevate sulle utenze del cliente.</p>}
+      <div className="sectiontitle quoteHistoryTitle"><div><History/><h2>Preventivi salvati</h2></div><span>{quotes.length}</span></div>
+      {quotes.length?<div className="quoteHistory">{quotes.map(quote=><article key={quote.id}><FileSpreadsheet/><div><b>{quote.file_name}</b><small>{new Date(quote.created_at).toLocaleString("it-IT")} · {quote.line_count} linee</small></div><div><span>MRR attuale <b>{formatCurrency(quote.current_mrr)}</b></span><span>Proposto <b>{formatCurrency(quote.proposed_mrr)}</b></span></div></article>)}</div>:<Empty icon={<History/>} text="Nessun configuratore generato"/>}
     </section>
   </div>
 }

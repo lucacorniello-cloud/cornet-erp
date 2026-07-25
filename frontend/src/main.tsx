@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"tariffs"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"settings";
+type Page="dashboard"|"customers"|"imports"|"tariffs"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -75,6 +75,8 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="simreport"} icon={<BarChart3/>} onClick={()=>setPage("simreport")}>Report SIM</Nav>
         <div className="navgroup">SPEDIZIONI</div>
         <Nav active={page==="ddt"} icon={<Truck/>} onClick={()=>setPage("ddt")}>Spedizioni e DDT</Nav>
+        <div className="navgroup">DOCUMENTI</div>
+        <Nav active={page==="letterhead"} icon={<FileText/>} onClick={()=>setPage("letterhead")}>Carta e buste</Nav>
         <Nav active={page==="settings"} icon={<Settings/>} onClick={()=>setPage("settings")}>Configurazione</Nav>
       </nav>
       <div className="navfoot"><span>VERSIONE</span><b>0.2 · WINDTRE SME</b></div>
@@ -90,6 +92,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="inventory"&&<SimInventory initialFilter={inventoryFilter}/>}
       {page==="simreport"&&<SimReport openInventory={openInventory}/>}
       {page==="ddt"&&<DdtShipments/>}
+      {page==="letterhead"&&<LetterheadDesigner/>}
       {page==="settings"&&<StoreConfiguration value={store} saved={setStore}/>}
     </section>
   </div>;
@@ -388,6 +391,24 @@ function PreviewPanel({item}:{item:ImportPreview}){
 function ImportDetail({item,close}:{item:any;close:()=>void}){
   const grouped=useMemo(()=>Object.entries((item.changes||[]).reduce((acc:any,c:any)=>{(acc[c.change_type]??=[]).push(c);return acc},{})),[item]);
   return <div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)close()}}><section className="drawer"><button className="close" onClick={close}>×</button><small>ESTRAZIONE {item.competence_month}</small><h2>{item.file_name}</h2><div className="miniKpis"><b>{item.customer_count}<span>Clienti</span></b><b>{item.new_customers}<span>Nuovi</span></b><b>{item.missing_customers}<span>Assenti</span></b><b>{item.campaign_changes}<span>Campagne</span></b></div>{grouped.length?grouped.map(([name,changes]:any)=><div className="changegroup" key={name}><h3>{changeLabel(name)} <span>{changes.length}</span></h3>{changes.slice(0,100).map((c:any)=><div className="change" key={c.id}><div><b>{c.customer_key}</b><small>{c.asset_key||"Cliente"}</small></div><div><strong>{c.field_name||changeLabel(c.change_type)}</strong><small>{c.old_value||"—"} → {c.new_value||"—"}</small></div></div>)}</div>):<Empty icon={<CheckCircle2/>} text="Prima fotografia acquisita: nessun mese precedente da confrontare"/>}</section></div>;
+}
+
+function LetterheadDesigner(){
+  const [template,setTemplate]=useState<any>(null),[customers,setCustomers]=useState<any[]>([]),[mode,setMode]=useState<"A4"|"DL">("A4");
+  const [customerId,setCustomerId]=useState(""),[recipient,setRecipient]=useState({name:"",address:""}),[body,setBody]=useState(""),[message,setMessage]=useState("");
+  useEffect(()=>{fetch(API+"/letterhead-template").then(r=>r.json()).then(setTemplate);fetch(API+"/customers?limit=500").then(r=>r.json()).then(setCustomers)},[]);
+  function chooseCustomer(id:string){setCustomerId(id);const c=customers.find(x=>x.id===id);setRecipient({name:c?.business_name||"",address:c?.address||""})}
+  async function syncStore(){const r=await fetch(API+"/letterhead-template/sync-store",{method:"POST"});setTemplate(await r.json());setMessage("Dati copiati dalla configurazione del punto vendita.")}
+  async function save(){const r=await fetch(API+"/letterhead-template",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(template)});const d=await r.json();if(!r.ok){setMessage(d.detail||"Salvataggio non riuscito");return}setTemplate(d);setMessage("Template salvato correttamente.")}
+  async function generate(print=false){const r=await fetch(API+"/letterhead-template/pdf",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode,customer_id:customerId||null,recipient_name:recipient.name,recipient_address:recipient.address,body_text:body})});if(!r.ok){const d=await r.json();setMessage(d.detail||"Generazione non riuscita");return}const url=URL.createObjectURL(await r.blob());const w=window.open(url,"_blank");if(print&&w)setTimeout(()=>w.print(),800)}
+  if(!template)return <main className="page"><Empty icon={<FileText/>} text="Caricamento template…"/></main>;
+  const logoAlign={justifyContent:template.logo_horizontal==="left"?"flex-start":template.logo_horizontal==="right"?"flex-end":"center",alignItems:template.logo_vertical==="top"?"flex-start":template.logo_vertical==="bottom"?"flex-end":"center"};
+  return <main className="page"><div className="title"><div><small>IMMAGINE COORDINATA</small><h1>Carta e buste intestate</h1><p>Configura, calibra e stampa in scala reale A4 o busta DL.</p></div><div className="titleactions"><button className="secondary" onClick={()=>generate(false)}><Download/>Scarica PDF</button><button className="secondary" onClick={()=>generate(true)}><Printer/>Stampa</button><button className="new" onClick={save}>Salva template</button></div></div>
+    <div className="letterheadTabs"><button className={mode==="A4"?"active":""} onClick={()=>setMode("A4")}>Carta A4</button><button className={mode==="DL"?"active":""} onClick={()=>setMode("DL")}>Busta DL</button></div>
+    <div className="letterheadWorkspace"><aside className="letterheadControls"><button className="secondary full" onClick={syncStore}><Store/>Copia da configurazione agenzia</button><h3>Mittente</h3>{[["company_name","Azienda"],["company_address","Indirizzo completo"],["tax_id","Partita IVA / CF"],["phone","Telefono"],["email","Email"],["pec","PEC"],["website","Sito web"],["logo_url","URL logo"]].map(([key,label])=><label key={key}>{label}<input value={template[key]||""} onChange={e=>setTemplate({...template,[key]:e.target.value})}/></label>)}<label>Colore primario<input type="color" value={template.primary_color} onChange={e=>setTemplate({...template,primary_color:e.target.value})}/></label><label>Dimensione logo: {template.logo_size}px<input type="range" min="32" max="160" value={template.logo_size} onChange={e=>setTemplate({...template,logo_size:Number(e.target.value)})}/></label><label>Allineamento orizzontale<select value={template.logo_horizontal} onChange={e=>setTemplate({...template,logo_horizontal:e.target.value})}><option value="left">Sinistra</option><option value="center">Centro</option><option value="right">Destra</option></select></label><label>Allineamento verticale<select value={template.logo_vertical} onChange={e=>setTemplate({...template,logo_vertical:e.target.value})}><option value="top">Alto</option><option value="center">Centro</option><option value="bottom">Basso</option></select></label><h3>Destinatario</h3><label>Cliente CRM<select value={customerId} onChange={e=>chooseCustomer(e.target.value)}><option value="">Destinatario manuale</option>{customers.map(c=><option key={c.id} value={c.id}>{c.business_name}</option>)}</select></label><label>Nome / Ragione sociale<input value={recipient.name} onChange={e=>setRecipient({...recipient,name:e.target.value})}/></label><label>Indirizzo<textarea rows={3} value={recipient.address} onChange={e=>setRecipient({...recipient,address:e.target.value})}/></label><label>Sposta a sinistra: {template.recipient_offset_mm} mm<input type="range" min="0" max="100" value={template.recipient_offset_mm} onChange={e=>setTemplate({...template,recipient_offset_mm:Number(e.target.value)})}/></label>{mode==="A4"&&<label>Corpo della lettera<textarea rows={7} value={body} onChange={e=>setBody(e.target.value)} placeholder="Scrivi qui la comunicazione…"/></label>}{message&&<div className="formmessage">{message}</div>}</aside>
+      <section className="previewStage"><div className={"paperPreview "+mode.toLowerCase()} style={{"--primary":template.primary_color} as any}>{mode==="A4"?<><header className="paperHeader" style={logoAlign}>{template.logo_url?<img src={template.logo_url.startsWith("/")?assetUrl(template.logo_url):template.logo_url} style={{height:template.logo_size}}/>:null}<b>{template.company_name}</b></header><div className="paperLine"/><address className="paperRecipient" style={{right:`${20+template.recipient_offset_mm}mm`}}><b>{recipient.name||"Spett.le Destinatario"}</b><span>{recipient.address||"Indirizzo completo"}</span></address><div className="paperBody">{body||"Spazio riservato al contenuto della comunicazione."}</div><footer>{[template.company_name,template.company_address,template.tax_id&&`P.IVA/CF ${template.tax_id}`,template.phone,template.email,template.pec,template.website].filter(Boolean).join(" · ")}</footer></>:<><div className="envelopeSender">{template.logo_url?<img src={template.logo_url.startsWith("/")?assetUrl(template.logo_url):template.logo_url} style={{height:Math.min(template.logo_size,70)}}/>:null}<b>{template.company_name}</b><span>{template.company_address}</span></div><address className="envelopeRecipient" style={{right:`${10+template.recipient_offset_mm}mm`}}><b>{recipient.name||"Spett.le Destinatario"}</b><span>{recipient.address||"Indirizzo completo"}</span></address></>}</div></section>
+    </div>
+  </main>
 }
 
 const PLAN_TYPES=["VOCE","DATI","FISSO","DATI_M2M"];

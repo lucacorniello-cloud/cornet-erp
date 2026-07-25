@@ -167,8 +167,8 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
       </div>
       <div className="sectiontitle"><div><FileSpreadsheet/><h2>Utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
       <div className="exportactions">
-        <a className="exportbtn excel" href={`${API}/customers/${item.id}/services-pivot.xlsx`}><FileSpreadsheet/>Esporta Excel</a>
-        <a className="exportbtn pdf" href={`${API}/customers/${item.id}/services-pivot.pdf`}><FileText/>Esporta PDF</a>
+        <a className="exportbtn excel" href={`${API}/customers/${item.id}/services-pivot.xlsx`}><FileSpreadsheet/>Pivot Excel</a>
+        <a className="exportbtn pdf" href={`${API}/customers/${item.id}/services-pivot.pdf`}><FileText/>Pivot PDF</a>
       </div>
       {item.assets?.length?<div className="assetlist">{item.assets.map((asset:any)=><article className="assetcard" key={asset.asset_key}>
         <div className="assethead"><div className="asseticon"><BriefcaseBusiness/></div><div><small>{asset.asset_type||"UTENZA WINDTRE"}</small><h3>{asset.asset_number||asset.asset_key}</h3></div><Status value={asset.status==="ACTIVE"?"ACTIVE":item.portfolio_status}/></div>

@@ -2,7 +2,7 @@ import React, {useEffect, useMemo, useState} from "react";
 import ReactDOM from "react-dom/client";
 import {
   AlertTriangle, BarChart3, Boxes, BriefcaseBusiness, CheckCircle2, ChevronDown, ChevronRight, Download,
-  CircleDollarSign, Copy, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LogOut,
+  CircleDollarSign, Copy, FileClock, FileSpreadsheet, FileText, History, LayoutDashboard, LoaderCircle, LogOut,
   Mail, MessageCircle, Package, Pencil, Plus, Printer, Search, Settings, ShoppingCart, Smartphone, Store,
   Tag, Trash2, Truck, UploadCloud, Users, Wifi, XCircle, Zap
 } from "lucide-react";
@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"tariffs"|"terminals"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
+type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -71,6 +71,7 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="tariffs"} icon={<Tag/>} onClick={()=>setPage("tariffs")}>Piani tariffari</Nav>
         <Nav active={page==="terminals"} icon={<Smartphone/>} onClick={()=>setPage("terminals")}>Terminali GA e CB</Nav>
         <div className="navgroup">SIM E MAGAZZINO</div>
+        <Nav active={page==="terminalinventory"} icon={<Smartphone/>} onClick={()=>setPage("terminalinventory")}>Giacenze terminali</Nav>
         <Nav active={page==="products"} icon={<Package/>} onClick={()=>setPage("products")}>Prodotti</Nav>
         <Nav active={page==="orders"} icon={<ShoppingCart/>} onClick={()=>setPage("orders")}>Ordini SIM</Nav>
         <Nav active={page==="inventory"} icon={<Boxes/>} onClick={()=>openInventory()}>Magazzino SIM</Nav>
@@ -91,6 +92,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="windtrepanel"&&<WindTrePanel/>}
       {page==="tariffs"&&<TariffPlans/>}
       {page==="terminals"&&<TerminalCatalog/>}
+      {page==="terminalinventory"&&<TerminalInventory/>}
       {page==="products"&&<Products/>}
       {page==="orders"&&<SimOrders/>}
       {page==="inventory"&&<SimInventory initialFilter={inventoryFilter}/>}
@@ -489,6 +491,57 @@ function WindTrePanel(){
 const TERMINAL_BANDS=["START","SMERALDO","RUBINO","ZAFFIRO"];
 const TERMINAL_TYPES=["SMARTPHONE","TABLET","ROUTER","ACCESSORIO"];
 const EMPTY_TERMINAL={brand:"",model:"",memory:"",gsi_code:"",product_type:"SMARTPHONE",customer_band:"START",list_price:0,upfront:0,monthly_installment:0,final_installment:0};
+
+function TerminalInventory(){
+  const [channel,setChannel]=useState<"GA"|"CB">("GA");
+  const [data,setData]=useState<any>({items:[],kpi:{models:0,pieces:0},metadata:null});
+  const [search,setSearch]=useState("");
+  const [file,setFile]=useState<File|null>(null),[sheets,setSheets]=useState<string[]>([]),[sheet,setSheet]=useState("");
+  const [busy,setBusy]=useState(false),[toast,setToast]=useState<{kind:"ok"|"error";text:string}|null>(null);
+  async function load(){
+    const params=new URLSearchParams({channel});if(search)params.set("search",search);
+    const response=await fetch(API+"/terminal-inventory?"+params);
+    if(response.ok)setData(await response.json());
+  }
+  useEffect(()=>{const timer=setTimeout(load,150);return()=>clearTimeout(timer)},[channel,search]);
+  useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(null),5000);return()=>clearTimeout(timer)},[toast]);
+  function errorText(detail:any){
+    if(typeof detail==="string")return detail;
+    if(detail?.missing_columns?.length)return `${detail.message}. Mancano: ${detail.missing_columns.join(", ")}. Colonne rilevate: ${(detail.detected_columns||[]).join(", ")||"nessuna"}.`;
+    return detail?.message||"Operazione non riuscita";
+  }
+  async function inspectExcel(selected:File|null){
+    if(!selected)return;setBusy(true);setToast(null);setFile(selected);
+    try{
+      const body=new FormData();body.append("file",selected);
+      const response=await fetch(API+"/terminal-inventory/sheets",{method:"POST",body});const result=await response.json();
+      if(!response.ok)throw new Error(errorText(result.detail));
+      setSheets(result.sheets||[]);setSheet(result.sheets?.[0]||"");
+    }catch(error:any){setFile(null);setToast({kind:"error",text:error.message||"File non leggibile"})}
+    finally{setBusy(false)}
+  }
+  async function importExcel(){
+    if(!file||!sheet)return;setBusy(true);setToast(null);
+    try{
+      const body=new FormData();body.append("file",file);body.append("sheet_name",sheet);body.append("channel",channel);
+      const response=await fetch(API+"/terminal-inventory/import",{method:"POST",body});const result=await response.json();
+      if(!response.ok)throw new Error(errorText(result.detail));
+      setToast({kind:"ok",text:`Giacenza ${channel} aggiornata: ${result.imported} modelli importati${result.skipped.length?`, ${result.skipped.length} righe ignorate`:""}.`});
+      setSheets([]);setFile(null);await load();
+    }catch(error:any){setToast({kind:"error",text:error.message||"Importazione non riuscita"})}
+    finally{setBusy(false)}
+  }
+  return <main className="page">
+    <div className="title"><div><small>MAGAZZINO TERMINALI</small><h1>Giacenze GA e CB</h1><p>Disponibilità fisica separata per nuove attivazioni e Customer Base.</p></div><label className={"secondary uploadbutton "+(busy?"disabled":"")}><UploadCloud/>{busy?"Elaborazione…":`Importa Excel ${channel}`}<input disabled={busy} type="file" accept=".xlsx,.xls" onChange={e=>inspectExcel(e.target.files?.[0]||null)}/></label></div>
+    <div className="segmenttabs"><button className={channel==="GA"?"active":""} onClick={()=>{setChannel("GA");setSheets([]);setFile(null)}}>GA · Acquisition</button><button className={channel==="CB"?"active":""} onClick={()=>{setChannel("CB");setSheets([]);setFile(null)}}>CB · Customer Base</button></div>
+    {busy&&<div className="inventoryLoading"><LoaderCircle/>Elaborazione del file in corso…</div>}
+    {sheets.length>0&&<div className="overlay inventorySheetOverlay"><section className="sheetModal"><button className="close" onClick={()=>{setSheets([]);setFile(null)}}>×</button><small>SELEZIONA FOGLIO</small><h2>Quale foglio vuoi importare?</h2><p>{file?.name} · il caricamento sostituirà soltanto la giacenza {channel}.</p><label>Foglio di lavoro<select value={sheet} onChange={e=>setSheet(e.target.value)}>{sheets.map(value=><option key={value}>{value}</option>)}</select></label><button className="new" disabled={busy||!sheet} onClick={importExcel}>{busy?<><LoaderCircle/>Importazione…</>:<>Conferma importazione {channel}</>}</button></section></div>}
+    {toast&&<div className={"inventoryToast "+toast.kind}>{toast.kind==="ok"?<CheckCircle2/>:<XCircle/>}<span>{toast.text}</span><button onClick={()=>setToast(null)}>×</button></div>}
+    <section className="inventoryKpis"><article><span>Modelli totali</span><strong>{data.kpi.models||0}</strong><Smartphone/></article><article><span>Pezzi totali</span><strong>{data.kpi.pieces||0}</strong><Boxes/></article><article><span>Ultimo aggiornamento</span><strong>{data.metadata?new Date(data.metadata.updated_at).toLocaleDateString("it-IT"):"—"}</strong><small>{data.metadata?new Date(data.metadata.updated_at).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}):"Nessuna importazione"}</small><History/></article></section>
+    <div className="toolbar inventoryToolbar"><label className="searchbox"><Search/><input placeholder="Cerca modello, Codice GSI o note…" value={search} onChange={e=>setSearch(e.target.value)}/></label>{data.metadata&&<span className="catalogMeta">{data.metadata.file_name} · foglio {data.metadata.sheet_name}</span>}</div>
+    <div className="tablewrap inventoryTerminalTable"><table><thead><tr><th>Modello</th><th>Codice GSI</th><th>Pezzi</th><th>Note</th><th>Skip disponibilità</th><th>Stato</th></tr></thead><tbody>{data.items.map((item:any)=><tr key={item.id}><td><b>{item.model}</b></td><td><code>{item.gsi_code}</code></td><td><span className={"pieceBadge "+(item.pieces>0?"positive":"empty")}>{item.pieces}</span></td><td><em>{item.notes||"—"}</em></td><td>{item.skip_availability?<span className="skipIcon yes" title="Attivo"><CheckCircle2/></span>:<span className="skipIcon no" title="Disattivo"><XCircle/></span>}</td><td><span className={"availability "+(item.available?"available":"unavailable")}>{item.availability_label}</span></td></tr>)}</tbody></table>{!data.items.length&&<Empty icon={<Smartphone/>} text={`Nessuna giacenza ${channel} importata`}/>}</div>
+  </main>
+}
 
 function TerminalCatalog(){
   const [channel,setChannel]=useState<"GA"|"CB">("GA"),[data,setData]=useState<any>({items:[],metadata:null});

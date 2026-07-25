@@ -227,6 +227,12 @@ class SimInventoryImport(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class DdtShipmentSim(Base):
+    __tablename__ = "ddt_shipment_sims"
+    ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
+    sim_inventory_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sim_inventory.id", ondelete="RESTRICT"), primary_key=True)
+
+
 class DdtShipment(Base):
     __tablename__ = "ddt_shipments"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -247,6 +253,7 @@ class DdtShipment(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     customer: Mapped[Customer | None] = relationship()
+    sims: Mapped[list[SimInventory]] = relationship(secondary="ddt_shipment_sims")
 
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -284,6 +291,7 @@ class DdtShipmentRequest(BaseModel):
     carrier: str | None = None
     tracking_number: str | None = None
     status: str = "IN_PREPARAZIONE"
+    sim_ids: list[uuid.UUID] = []
 
 
 class DdtStatusRequest(BaseModel):
@@ -1060,6 +1068,8 @@ def serialize_ddt(item: DdtShipment) -> dict[str, Any]:
         "carrier": item.carrier or "",
         "tracking_number": item.tracking_number or "",
         "status": item.status,
+        "sims": [serialize_inventory(sim) for sim in item.sims],
+        "sim_ids": [str(sim.id) for sim in item.sims],
         "sender_snapshot": item.sender_snapshot,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
@@ -1073,10 +1083,21 @@ def validate_ddt(data: DdtShipmentRequest):
         raise HTTPException(422, "Il destinatario è obbligatorio")
     if not data.recipient_address.strip():
         raise HTTPException(422, "L'indirizzo di consegna è obbligatorio")
-    if not data.goods_description.strip():
+    if not data.goods_description.strip() and not data.sim_ids:
         raise HTTPException(422, "La descrizione dei beni è obbligatoria")
     if data.status == "SPEDITO" and not (data.tracking_number or "").strip():
         raise HTTPException(422, "Inserisci il tracking prima di segnare il DDT come spedito")
+
+
+def resolve_ddt_sims(db, sim_ids: list[uuid.UUID], customer_id: uuid.UUID | None) -> list[SimInventory]:
+    if not sim_ids:
+        return []
+    items = db.scalars(select(SimInventory).where(SimInventory.id.in_(sim_ids))).all()
+    if len(items) != len(set(sim_ids)):
+        raise HTTPException(422, "Una o più SIM selezionate non sono presenti in magazzino")
+    if customer_id and any(item.customer_id != customer_id for item in items):
+        raise HTTPException(422, "Puoi inserire soltanto SIM associate al cliente selezionato")
+    return items
 
 
 @app.get("/api/v1/ddt")
@@ -1117,6 +1138,7 @@ def create_ddt(data: DdtShipmentRequest):
             tracking_number=(data.tracking_number or "").strip() or None,
             status=data.status,
             sender_snapshot=sender_snapshot(store),
+            sims=resolve_ddt_sims(db, data.sim_ids, data.customer_id),
         )
         db.add(item)
         db.commit()
@@ -1133,8 +1155,10 @@ def update_ddt(ddt_id: uuid.UUID, data: DdtShipmentRequest):
             raise HTTPException(404, "DDT non trovato")
         if item.status == "ANNULLATO":
             raise HTTPException(409, "Un DDT annullato non può essere modificato")
-        for field, value in data.model_dump().items():
+        sim_ids = data.sim_ids
+        for field, value in data.model_dump(exclude={"sim_ids"}).items():
             setattr(item, field, value.strip() if isinstance(value, str) else value)
+        item.sims = resolve_ddt_sims(db, sim_ids, data.customer_id)
         db.commit()
         db.refresh(item)
         return serialize_ddt(item)
@@ -1180,7 +1204,14 @@ def ddt_pdf(ddt_id: uuid.UUID):
         if not item:
             raise HTTPException(404, "DDT non trovato")
         snapshot = item.sender_snapshot or {}
-        lines = [line.strip() for line in item.goods_description.splitlines() if line.strip()] or ["—"]
+        lines = [line.strip() for line in item.goods_description.splitlines() if line.strip()]
+        if item.sims:
+            lines.append("SIM SELEZIONATE:")
+            lines.extend(
+                f"{sim.product.name} | ICCID: {sim.iccid} | Numero: {sim.msisdn or '—'} | Stato: {sim.status.replace('_', ' ')}"
+                for sim in item.sims
+            )
+        lines = lines or ["—"]
         chunks = [lines[index:index + 15] for index in range(0, len(lines), 15)]
         styles = getSampleStyleSheet()
         body = ParagraphStyle("ddt-body", parent=styles["BodyText"], fontSize=9, leading=12)
@@ -1401,6 +1432,7 @@ def sim_inventory(
     status: str | None = None,
     product_id: uuid.UUID | None = None,
     order_id: uuid.UUID | None = None,
+    customer_id: uuid.UUID | None = None,
     limit: int = Query(500, ge=1, le=2000),
 ):
     with SessionLocal() as db:
@@ -1411,6 +1443,8 @@ def sim_inventory(
             query = query.where(SimInventory.product_id == product_id)
         if order_id:
             query = query.where(SimInventory.order_id == order_id)
+        if customer_id:
+            query = query.where(SimInventory.customer_id == customer_id)
         if search.strip():
             pattern = f"%{search.strip()}%"
             query = query.outerjoin(Customer).join(Product).outerjoin(SimOrder).where(or_(

@@ -19,19 +19,20 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from jose import jwt
 from openpyxl import load_workbook
+import xlrd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -280,6 +281,39 @@ class LetterheadTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class TerminalCatalogItem(Base):
+    __tablename__ = "terminal_catalog_items"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel: Mapped[str] = mapped_column(String(10), index=True)
+    brand: Mapped[str | None] = mapped_column(String(100), index=True)
+    model: Mapped[str] = mapped_column(String(255), index=True)
+    memory: Mapped[str | None] = mapped_column(String(80))
+    gsi_code: Mapped[str] = mapped_column(String(100), index=True)
+    product_type: Mapped[str] = mapped_column(String(40), default="SMARTPHONE", index=True)
+    offer_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    customer_band: Mapped[str | None] = mapped_column(String(40), index=True)
+    list_price_cents: Mapped[int] = mapped_column(Integer, default=0)
+    standard_installment_cents: Mapped[int] = mapped_column(Integer, default=0)
+    kasko_cents: Mapped[int] = mapped_column(Integer, default=0)
+    kasko_premium_cents: Mapped[int] = mapped_column(Integer, default=0)
+    upfront_cents: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_installment_cents: Mapped[int] = mapped_column(Integer, default=0)
+    final_installment_cents: Mapped[int] = mapped_column(Integer, default=0)
+    discount_percent: Mapped[int] = mapped_column(Integer, default=0)
+    promotion_name: Mapped[str | None] = mapped_column(String(255))
+    promotion_id: Mapped[str | None] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class TerminalCatalogMetadata(Base):
+    __tablename__ = "terminal_catalog_metadata"
+    channel: Mapped[str] = mapped_column(String(10), primary_key=True)
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    sheet_name: Mapped[str | None] = mapped_column(String(255))
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class DdtShipmentSim(Base):
     __tablename__ = "ddt_shipment_sims"
     ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
@@ -400,6 +434,19 @@ class LetterheadGenerateRequest(BaseModel):
     recipient_name: str
     recipient_address: str
     body_text: str | None = None
+
+
+class TerminalCBRequest(BaseModel):
+    brand: str
+    model: str
+    memory: str | None = None
+    gsi_code: str
+    product_type: str = "SMARTPHONE"
+    customer_band: str = "START"
+    list_price: float = 0
+    upfront: float = 0
+    monthly_installment: float = 0
+    final_installment: float = 0
 
 
 class ProductRequest(BaseModel):
@@ -1286,6 +1333,243 @@ def letterhead_pdf(data: LetterheadGenerateRequest):
         pdf.showPage(); pdf.save(); buffer.seek(0)
         filename = "carta-intestata-a4.pdf" if data.mode == "A4" else "busta-intestata-dl.pdf"
         return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{filename}"'})
+
+
+TERMINAL_TYPES = {"SMARTPHONE", "TABLET", "ROUTER", "ACCESSORIO"}
+CUSTOMER_BANDS = {"START", "SMERALDO", "RUBINO", "ZAFFIRO"}
+GA_ALIASES = {
+    "model": {"MODELLO", "MODELLO_TERMINALE", "TERMINALE", "DESCRIZIONE"},
+    "gsi": {"CODICE_GSI", "GSI", "COD_GSI", "CODICE"},
+    "offer": {"OFFERTA", "OFFERTA_ASSOCIATA", "PROFILO"},
+    "list_price": {"PREZZO_LISTINO", "PREZZO_DI_LISTINO", "LISTINO"},
+    "standard": {"RATA_MENSILE_LISTINO_STANDARD", "RATA_STANDARD"},
+    "kasko": {"KASKO", "CANONE_KASKO"},
+    "kasko_premium": {"KASKO_PREMIUM", "CANONE_KASKO_PREMIUM"},
+    "upfront": {"ANTICIPO"},
+    "monthly": {"RATA_MENSILE", "RATA"},
+    "final": {"RATA_FINALE", "MAXIRATA", "MAXI_RATA"},
+    "discount": {"SCONTO", "SCONTO_PERCENTUALE", "SCONTO"},
+    "promotion": {"PROMOZIONE", "NOME_PROMOZIONE", "PROMO"},
+    "promotion_id": {"ID_PROMOZIONE", "ID_PROMO"},
+}
+
+
+def serialize_terminal(item: TerminalCatalogItem) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "channel": item.channel, "brand": item.brand or "", "model": item.model,
+        "memory": item.memory or "", "gsi_code": item.gsi_code, "product_type": item.product_type,
+        "offer_name": item.offer_name or "", "customer_band": item.customer_band or "",
+        "list_price": item.list_price_cents / 100, "standard_installment": item.standard_installment_cents / 100,
+        "kasko": item.kasko_cents / 100, "kasko_premium": item.kasko_premium_cents / 100,
+        "upfront": item.upfront_cents / 100, "monthly_installment": item.monthly_installment_cents / 100,
+        "final_installment": item.final_installment_cents / 100, "discount_percent": item.discount_percent,
+        "promotion_name": item.promotion_name or "", "promotion_id": item.promotion_id or "",
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def terminal_query(db, channel: str, search: str = "", product_type: str | None = None, customer_band: str | None = None):
+    query = select(TerminalCatalogItem).where(TerminalCatalogItem.channel == channel).order_by(TerminalCatalogItem.brand, TerminalCatalogItem.model)
+    if product_type:
+        query = query.where(TerminalCatalogItem.product_type == product_type)
+    if customer_band:
+        query = query.where(TerminalCatalogItem.customer_band == customer_band)
+    if search.strip():
+        pattern = f"%{search.strip()}%"
+        query = query.where(or_(TerminalCatalogItem.model.ilike(pattern), TerminalCatalogItem.brand.ilike(pattern), TerminalCatalogItem.gsi_code.ilike(pattern), TerminalCatalogItem.offer_name.ilike(pattern)))
+    return query
+
+
+@app.get("/api/v1/terminals")
+def terminals(channel: str, search: str = "", product_type: str | None = None, customer_band: str | None = None):
+    if channel not in {"GA", "CB"}:
+        raise HTTPException(422, "Canale non valido")
+    with SessionLocal() as db:
+        items = db.scalars(terminal_query(db, channel, search, product_type, customer_band)).all()
+        meta = db.get(TerminalCatalogMetadata, channel)
+        return {
+            "items": [serialize_terminal(item) for item in items],
+            "metadata": {"file_name": meta.file_name, "sheet_name": meta.sheet_name, "row_count": meta.row_count, "updated_at": meta.updated_at.isoformat()} if meta else None,
+        }
+
+
+@app.post("/api/v1/terminals-ga/sheets")
+async def terminal_ga_sheets(file: UploadFile = File(...)):
+    contents = await file.read()
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xlsm", ".xls")):
+        raise HTTPException(422, "Carica un file Excel .xlsx, .xlsm o .xls")
+    try:
+        sheets = xlrd.open_workbook(file_contents=contents).sheet_names() if filename.endswith(".xls") else load_workbook(BytesIO(contents), read_only=True, data_only=True).sheetnames
+    except Exception as exc:
+        raise HTTPException(422, f"File Excel non leggibile: {exc}")
+    return {"sheets": sheets}
+
+
+def find_ga_header(rows):
+    best = None
+    known = {value for values in GA_ALIASES.values() for value in values}
+    for row_number, values in enumerate(rows[:25], 1):
+        headers = [normalize_header(value) for value in values]
+        score = sum(header in known for header in headers)
+        if not best or score > best[0]:
+            best = (score, row_number, headers)
+    if not best or best[0] < 2 or not any(value in GA_ALIASES["model"] for value in best[2]) or not any(value in GA_ALIASES["gsi"] for value in best[2]):
+        raise HTTPException(422, "Colonne obbligatorie Modello e Codice GSI non riconosciute")
+    return best[1], best[2]
+
+
+@app.post("/api/v1/terminals-ga/import")
+async def import_terminals_ga(file: UploadFile = File(...), sheet_name: str = Form(...)):
+    contents = await file.read()
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xlsm", ".xls")):
+        raise HTTPException(422, "Carica un file Excel .xlsx, .xlsm o .xls")
+    try:
+        if filename.endswith(".xls"):
+            workbook = xlrd.open_workbook(file_contents=contents)
+            if sheet_name not in workbook.sheet_names():
+                raise HTTPException(422, "Foglio Excel non trovato")
+            source = workbook.sheet_by_name(sheet_name)
+            sheet_rows = [source.row_values(index) for index in range(source.nrows)]
+        else:
+            workbook = load_workbook(BytesIO(contents), read_only=True, data_only=True)
+            if sheet_name not in workbook.sheetnames:
+                raise HTTPException(422, "Foglio Excel non trovato")
+            sheet_rows = list(workbook[sheet_name].iter_rows(values_only=True))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(422, f"File Excel non leggibile: {exc}")
+    header_row, headers = find_ga_header(sheet_rows)
+    rows, skipped = [], []
+    for row_number, values in enumerate(sheet_rows[header_row:], header_row + 1):
+        raw = {headers[i]: clean(value) for i, value in enumerate(values) if i < len(headers) and headers[i] and clean(value)}
+        if not raw:
+            continue
+        model, gsi = mapped_value(raw, GA_ALIASES["model"]), mapped_value(raw, GA_ALIASES["gsi"])
+        if not model or not gsi:
+            skipped.append({"row": row_number, "error": "Modello o Codice GSI mancante"})
+            continue
+        rows.append(TerminalCatalogItem(
+            channel="GA", model=model, gsi_code=gsi, product_type="SMARTPHONE",
+            offer_name=mapped_value(raw, GA_ALIASES["offer"]) or None,
+            list_price_cents=tariff_cents(mapped_value(raw, GA_ALIASES["list_price"])),
+            standard_installment_cents=tariff_cents(mapped_value(raw, GA_ALIASES["standard"])),
+            kasko_cents=tariff_cents(mapped_value(raw, GA_ALIASES["kasko"])),
+            kasko_premium_cents=tariff_cents(mapped_value(raw, GA_ALIASES["kasko_premium"])),
+            upfront_cents=tariff_cents(mapped_value(raw, GA_ALIASES["upfront"])),
+            monthly_installment_cents=tariff_cents(mapped_value(raw, GA_ALIASES["monthly"])),
+            final_installment_cents=tariff_cents(mapped_value(raw, GA_ALIASES["final"])),
+            discount_percent=round(parse_monthly_fee(mapped_value(raw, GA_ALIASES["discount"]))),
+            promotion_name=mapped_value(raw, GA_ALIASES["promotion"]) or None,
+            promotion_id=mapped_value(raw, GA_ALIASES["promotion_id"]) or None,
+        ))
+    if not rows:
+        raise HTTPException(422, "Il foglio non contiene terminali validi")
+    with SessionLocal() as db:
+        db.execute(delete(TerminalCatalogItem).where(TerminalCatalogItem.channel == "GA"))
+        db.add_all(rows)
+        metadata = db.get(TerminalCatalogMetadata, "GA") or TerminalCatalogMetadata(channel="GA")
+        metadata.file_name, metadata.sheet_name, metadata.row_count, metadata.updated_at = file.filename, sheet_name, len(rows), datetime.now(timezone.utc)
+        db.add(metadata)
+        db.commit()
+    return {"imported": len(rows), "skipped": skipped[:100], "sheet_name": sheet_name}
+
+
+@app.get("/api/v1/terminals-ga.pdf")
+def terminals_ga_pdf(search: str = ""):
+    with SessionLocal() as db:
+        items = db.scalars(terminal_query(db, "GA", search)).all()
+        store = get_or_create_store_settings(db)
+        meta = db.get(TerminalCatalogMetadata, "GA")
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
+        styles = getSampleStyleSheet()
+        story = [Paragraph(f"<b>{store.legal_name or store.store_name} - Listino Terminali GA</b>", styles["Title"]), Paragraph(f"Aggiornato: {meta.updated_at.strftime('%d/%m/%Y %H:%M') if meta else '—'}", styles["BodyText"]), Spacer(1, 4*mm)]
+        data = [["Modello","GSI","Offerta","Listino","Anticipo","Rata","Finale","Kasko","Sconto"]]
+        data.extend([[item.model,item.gsi_code,item.offer_name or "—",f"€ {item.list_price_cents/100:.2f}",f"€ {item.upfront_cents/100:.2f}",f"€ {item.monthly_installment_cents/100:.2f}",f"€ {item.final_installment_cents/100:.2f}",f"€ {item.kasko_cents/100:.2f}",f"{item.discount_percent}%"] for item in items])
+        table = Table(data, repeatRows=1, colWidths=[45*mm,25*mm,42*mm,20*mm,20*mm,20*mm,20*mm,20*mm,16*mm])
+        table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1e3a8a")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.3,colors.HexColor("#cbd5e1")),("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"TOP"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#f8fafc")])]))
+        story.append(table); doc.build(story); buffer.seek(0)
+        return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="listino-terminali-ga.pdf"'})
+
+
+def apply_cb(item: TerminalCatalogItem, data: TerminalCBRequest):
+    if data.product_type not in TERMINAL_TYPES or data.customer_band not in CUSTOMER_BANDS:
+        raise HTTPException(422, "Tipologia o fascia non valida")
+    if not data.brand.strip() or not data.model.strip() or not data.gsi_code.strip():
+        raise HTTPException(422, "Marca, modello e Codice GSI sono obbligatori")
+    item.brand, item.model, item.gsi_code = data.brand.strip(), data.model.strip(), data.gsi_code.strip()
+    item.memory, item.product_type, item.customer_band = (data.memory or "").strip() or None, data.product_type, data.customer_band
+    item.list_price_cents, item.upfront_cents = tariff_cents(data.list_price), tariff_cents(data.upfront)
+    item.monthly_installment_cents, item.final_installment_cents = tariff_cents(data.monthly_installment), tariff_cents(data.final_installment)
+
+
+@app.post("/api/v1/terminals-cb")
+def create_terminal_cb(data: TerminalCBRequest):
+    with SessionLocal() as db:
+        item = TerminalCatalogItem(channel="CB", model=data.model, gsi_code=data.gsi_code)
+        apply_cb(item, data); db.add(item); db.commit(); db.refresh(item)
+        return serialize_terminal(item)
+
+
+@app.put("/api/v1/terminals-cb/{item_id}")
+def update_terminal_cb(item_id: uuid.UUID, data: TerminalCBRequest):
+    with SessionLocal() as db:
+        item = db.get(TerminalCatalogItem, item_id)
+        if not item or item.channel != "CB":
+            raise HTTPException(404, "Terminale CB non trovato")
+        apply_cb(item, data); db.commit(); db.refresh(item)
+        return serialize_terminal(item)
+
+
+@app.delete("/api/v1/terminals-cb/{item_id}")
+def delete_terminal_cb(item_id: uuid.UUID):
+    with SessionLocal() as db:
+        item = db.get(TerminalCatalogItem, item_id)
+        if not item or item.channel != "CB":
+            raise HTTPException(404, "Terminale CB non trovato")
+        db.delete(item); db.commit(); return {"ok": True}
+
+
+@app.delete("/api/v1/terminals-cb")
+def clear_terminals_cb(customer_band: str | None = None):
+    with SessionLocal() as db:
+        query = delete(TerminalCatalogItem).where(TerminalCatalogItem.channel == "CB")
+        if customer_band:
+            query = query.where(TerminalCatalogItem.customer_band == customer_band)
+        result = db.execute(query); db.commit(); return {"deleted": result.rowcount}
+
+
+DEFAULT_CB = [
+    ("Apple","iPhone 16","128GB","GSI-IP16-128","SMARTPHONE"),
+    ("Apple","iPhone 16 Pro","256GB","GSI-IP16P-256","SMARTPHONE"),
+    ("Apple","iPhone 17","256GB","GSI-IP17-256","SMARTPHONE"),
+    ("Apple","iPad Air","128GB","GSI-IPADAIR-128","TABLET"),
+    ("Samsung","Galaxy S25","256GB","GSI-S25-256","SMARTPHONE"),
+    ("Samsung","Galaxy S26","256GB","GSI-S26-256","SMARTPHONE"),
+    ("Samsung","Galaxy Z Fold","512GB","GSI-ZFOLD-512","SMARTPHONE"),
+    ("Xiaomi","Xiaomi 15","256GB","GSI-XIAOMI15-256","SMARTPHONE"),
+    ("Honor","Honor Magic","256GB","GSI-HONOR-MAGIC","SMARTPHONE"),
+    ("Motorola","Edge","256GB","GSI-MOTO-EDGE","SMARTPHONE"),
+    ("TCL","TCL 60","128GB","GSI-TCL60-128","SMARTPHONE"),
+    ("ZTE","Router 5G","—","GSI-ZTE-5G","ROUTER"),
+    ("Samsung","Galaxy Buds","—","GSI-BUDS","ACCESSORIO"),
+]
+
+
+@app.post("/api/v1/terminals-cb/reset")
+def reset_terminals_cb():
+    with SessionLocal() as db:
+        db.execute(delete(TerminalCatalogItem).where(TerminalCatalogItem.channel == "CB"))
+        for band in ("START","SMERALDO","RUBINO","ZAFFIRO"):
+            for brand, model, memory, gsi, product_type in DEFAULT_CB:
+                db.add(TerminalCatalogItem(channel="CB",brand=brand,model=model,memory=memory,gsi_code=f"{gsi}-{band}",product_type=product_type,customer_band=band))
+        metadata = db.get(TerminalCatalogMetadata, "CB") or TerminalCatalogMetadata(channel="CB")
+        metadata.file_name, metadata.sheet_name, metadata.row_count, metadata.updated_at = "Matrice predefinita", None, len(DEFAULT_CB)*4, datetime.now(timezone.utc)
+        db.add(metadata); db.commit()
+        return {"created": len(DEFAULT_CB)*4}
 
 
 TARIFF_PLAN_TYPES = {"VOCE", "DATI", "FISSO", "DATI_M2M"}

@@ -763,7 +763,9 @@ SIM_COLUMN_ALIASES = {
     "sku": {"CODICE", "CODICE_ARTICOLO", "SKU", "ARTICOLO"},
     "status": {"STATO", "STATO_SIM"},
     "order_number": {"ORDINE", "ID_ORDINE", "NUMERO_ORDINE"},
-    "msisdn": {"MSISDN", "NUMERO", "NUMERO_TELEFONICO"},
+    "msisdn": {"MSISDN", "NUMERO", "NUMERO_TELEFONICO", "NUMERO_ASSEGNATO_MSISDN"},
+    "customer": {"CLIENTE", "NOME_CLIENTE", "ASSEGNATA_A_CLIENTE"},
+    "order_date": {"DATA_ORDINE", "DATA"},
 }
 SIM_STATUSES = {"IN_MAGAZZINO", "ASSEGNATA", "ATTIVATA", "DISABILITATA", "SOSPESA"}
 ORDER_STATUSES = {"INVIATO", "IN_ATTESA", "IN_LAVORAZIONE", "RICEVUTO", "EVASO"}
@@ -811,6 +813,16 @@ def parse_uploaded_table(filename: str, contents: bytes) -> list[dict[str, str]]
 
 def mapped_value(row: dict[str, str], aliases: set[str]) -> str:
     return next((row[key] for key in aliases if row.get(key)), "")
+
+
+def parse_compact_date(value: str) -> date:
+    normalized = re.sub(r"\D", "", value or "")
+    for pattern in ("%Y%m%d", "%d%m%Y"):
+        try:
+            return datetime.strptime(normalized, pattern).date()
+        except ValueError:
+            pass
+    return date.today()
 
 
 def cents_from_value(value: Any) -> int | None:
@@ -1515,14 +1527,70 @@ async def import_sim_inventory(
     added = updated = rejected = 0
     errors = []
     with SessionLocal() as db:
+        products = {item.sku.upper(): item for item in db.scalars(select(Product)).all()}
+        customers = {item.business_name.strip().casefold(): item for item in db.scalars(select(Customer)).all()}
+        orders = {item.order_number.upper(): item for item in db.scalars(select(SimOrder)).unique().all()}
+        created_products = created_customers = created_orders = 0
+
+        # Il formato esportato da Cornet contiene già articolo, ordine e cliente:
+        # creiamo prima le anagrafiche mancanti, poi importiamo le singole SIM.
+        for row in rows:
+            sku = (mapped_value(row, SIM_COLUMN_ALIASES["sku"]) or product_sku or "").strip().upper()
+            if sku and sku not in products:
+                product = Product(sku=sku, name=sku, is_active=True)
+                db.add(product)
+                db.flush()
+                products[sku] = product
+                created_products += 1
+            customer_name = mapped_value(row, SIM_COLUMN_ALIASES["customer"]).strip()
+            customer_key = customer_name.casefold()
+            if customer_name and customer_key not in customers:
+                customer = Customer(
+                    business_name=customer_name,
+                    segment="MICROBUSINESS",
+                    portfolio_status="ACTIVE",
+                )
+                db.add(customer)
+                db.flush()
+                customers[customer_key] = customer
+                created_customers += 1
+
+        order_lines: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        order_dates: dict[str, date] = {}
+        for row in rows:
+            source_order = (mapped_value(row, SIM_COLUMN_ALIASES["order_number"]) or order_number or "").strip().upper()
+            sku = (mapped_value(row, SIM_COLUMN_ALIASES["sku"]) or product_sku or "").strip().upper()
+            if source_order and sku:
+                order_lines[source_order][sku] += 1
+                order_dates.setdefault(source_order, parse_compact_date(mapped_value(row, SIM_COLUMN_ALIASES["order_date"])))
+        for source_order, lines in order_lines.items():
+            if source_order in orders:
+                continue
+            order = SimOrder(
+                order_number=source_order,
+                order_date=order_dates[source_order],
+                supplier="WINDTRE",
+                status="RICEVUTO",
+            )
+            db.add(order)
+            db.flush()
+            for sku, quantity in lines.items():
+                db.add(SimOrderLine(order_id=order.id, product_id=products[sku].id, quantity=quantity))
+            orders[source_order] = order
+            created_orders += 1
+
         for index, row in enumerate(rows, 2):
             iccid = normalize_iccid(mapped_value(row, SIM_COLUMN_ALIASES["iccid"]))
             sku = (mapped_value(row, SIM_COLUMN_ALIASES["sku"]) or product_sku or "").strip().upper()
             status = normalize_header(mapped_value(row, SIM_COLUMN_ALIASES["status"]) or default_status)
             source_order = (mapped_value(row, SIM_COLUMN_ALIASES["order_number"]) or order_number or "").strip().upper()
             msisdn = normalize_iccid(mapped_value(row, SIM_COLUMN_ALIASES["msisdn"])) or None
-            product = db.scalar(select(Product).where(Product.sku == sku))
-            order = db.scalar(select(SimOrder).where(SimOrder.order_number == source_order)) if source_order else None
+            customer_name = mapped_value(row, SIM_COLUMN_ALIASES["customer"]).strip()
+            customer = customers.get(customer_name.casefold()) if customer_name else None
+            if customer or msisdn:
+                status = "ASSEGNATA"
+            product = products.get(sku)
+            order = orders.get(source_order) if source_order else None
             if len(iccid) not in {19, 20} or not product or status not in SIM_STATUSES:
                 rejected += 1
                 errors.append({"row": index, "iccid": iccid, "error": "ICCID, prodotto o stato non valido"})
@@ -1533,6 +1601,7 @@ async def import_sim_inventory(
                 item.order_id = order.id if order else None
                 item.status = status
                 item.msisdn = msisdn
+                item.customer_id = customer.id if customer else None
                 updated += 1
             else:
                 db.add(SimInventory(
@@ -1541,6 +1610,7 @@ async def import_sim_inventory(
                     order_id=order.id if order else None,
                     status=status,
                     msisdn=msisdn,
+                    customer_id=customer.id if customer else None,
                 ))
                 added += 1
         record = SimInventoryImport(
@@ -1557,6 +1627,9 @@ async def import_sim_inventory(
             "added": added,
             "updated": updated,
             "rejected": rejected,
+            "created_products": created_products,
+            "created_orders": created_orders,
+            "created_customers": created_customers,
             "errors": errors[:50],
         }
 

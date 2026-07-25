@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"tariffs"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
+type Page="dashboard"|"customers"|"imports"|"tariffs"|"terminals"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -68,6 +68,7 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
         <div className="navgroup">COMMERCIALE</div>
         <Nav active={page==="tariffs"} icon={<Tag/>} onClick={()=>setPage("tariffs")}>Piani tariffari</Nav>
+        <Nav active={page==="terminals"} icon={<Smartphone/>} onClick={()=>setPage("terminals")}>Terminali GA e CB</Nav>
         <div className="navgroup">SIM E MAGAZZINO</div>
         <Nav active={page==="products"} icon={<Package/>} onClick={()=>setPage("products")}>Prodotti</Nav>
         <Nav active={page==="orders"} icon={<ShoppingCart/>} onClick={()=>setPage("orders")}>Ordini SIM</Nav>
@@ -87,6 +88,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
       {page==="tariffs"&&<TariffPlans/>}
+      {page==="terminals"&&<TerminalCatalog/>}
       {page==="products"&&<Products/>}
       {page==="orders"&&<SimOrders/>}
       {page==="inventory"&&<SimInventory initialFilter={inventoryFilter}/>}
@@ -408,6 +410,59 @@ function LetterheadDesigner(){
     <div className="letterheadWorkspace"><aside className="letterheadControls"><button className="secondary full" onClick={syncStore}><Store/>Copia da configurazione agenzia</button><h3>Mittente</h3>{[["company_name","Azienda"],["company_address","Indirizzo completo"],["tax_id","Partita IVA / CF"],["phone","Telefono"],["email","Email"],["pec","PEC"],["website","Sito web"],["logo_url","URL logo"]].map(([key,label])=><label key={key}>{label}<input value={template[key]||""} onChange={e=>setTemplate({...template,[key]:e.target.value})}/></label>)}<label>Colore primario<input type="color" value={template.primary_color} onChange={e=>setTemplate({...template,primary_color:e.target.value})}/></label><label>Dimensione logo: {template.logo_size}px<input type="range" min="32" max="160" value={template.logo_size} onChange={e=>setTemplate({...template,logo_size:Number(e.target.value)})}/></label><label>Allineamento orizzontale<select value={template.logo_horizontal} onChange={e=>setTemplate({...template,logo_horizontal:e.target.value})}><option value="left">Sinistra</option><option value="center">Centro</option><option value="right">Destra</option></select></label><label>Allineamento verticale<select value={template.logo_vertical} onChange={e=>setTemplate({...template,logo_vertical:e.target.value})}><option value="top">Alto</option><option value="center">Centro</option><option value="bottom">Basso</option></select></label><h3>Destinatario</h3><label>Cliente CRM<select value={customerId} onChange={e=>chooseCustomer(e.target.value)}><option value="">Destinatario manuale</option>{customers.map(c=><option key={c.id} value={c.id}>{c.business_name}</option>)}</select></label><label>Nome / Ragione sociale<input value={recipient.name} onChange={e=>setRecipient({...recipient,name:e.target.value})}/></label><label>Indirizzo<textarea rows={3} value={recipient.address} onChange={e=>setRecipient({...recipient,address:e.target.value})}/></label><label>Sposta a sinistra: {template.recipient_offset_mm} mm<input type="range" min="0" max="100" value={template.recipient_offset_mm} onChange={e=>setTemplate({...template,recipient_offset_mm:Number(e.target.value)})}/></label>{mode==="A4"&&<label>Corpo della lettera<textarea rows={7} value={body} onChange={e=>setBody(e.target.value)} placeholder="Scrivi qui la comunicazione…"/></label>}{message&&<div className="formmessage">{message}</div>}</aside>
       <section className="previewStage"><div className={"paperPreview "+mode.toLowerCase()} style={{"--primary":template.primary_color} as any}>{mode==="A4"?<><header className="paperHeader" style={logoAlign}>{template.logo_url?<img src={template.logo_url.startsWith("/")?assetUrl(template.logo_url):template.logo_url} style={{height:template.logo_size}}/>:null}<b>{template.company_name}</b></header><div className="paperLine"/><address className="paperRecipient" style={{right:`${20+template.recipient_offset_mm}mm`}}><b>{recipient.name||"Spett.le Destinatario"}</b><span>{recipient.address||"Indirizzo completo"}</span></address><div className="paperBody">{body||"Spazio riservato al contenuto della comunicazione."}</div><footer>{[template.company_name,template.company_address,template.tax_id&&`P.IVA/CF ${template.tax_id}`,template.phone,template.email,template.pec,template.website].filter(Boolean).join(" · ")}</footer></>:<><div className="envelopeSender">{template.logo_url?<img src={template.logo_url.startsWith("/")?assetUrl(template.logo_url):template.logo_url} style={{height:Math.min(template.logo_size,70)}}/>:null}<b>{template.company_name}</b><span>{template.company_address}</span></div><address className="envelopeRecipient" style={{right:`${10+template.recipient_offset_mm}mm`}}><b>{recipient.name||"Spett.le Destinatario"}</b><span>{recipient.address||"Indirizzo completo"}</span></address></>}</div></section>
     </div>
+  </main>
+}
+
+const TERMINAL_BANDS=["START","SMERALDO","RUBINO","ZAFFIRO"];
+const TERMINAL_TYPES=["SMARTPHONE","TABLET","ROUTER","ACCESSORIO"];
+const EMPTY_TERMINAL={brand:"",model:"",memory:"",gsi_code:"",product_type:"SMARTPHONE",customer_band:"START",list_price:0,upfront:0,monthly_installment:0,final_installment:0};
+
+function TerminalCatalog(){
+  const [channel,setChannel]=useState<"GA"|"CB">("GA"),[data,setData]=useState<any>({items:[],metadata:null});
+  const [search,setSearch]=useState(""),[productType,setProductType]=useState(""),[brand,setBrand]=useState(""),[band,setBand]=useState("START");
+  const [file,setFile]=useState<File|null>(null),[sheets,setSheets]=useState<string[]>([]),[sheet,setSheet]=useState("");
+  const [busy,setBusy]=useState(false),[message,setMessage]=useState("");
+  const [form,setForm]=useState<any>(EMPTY_TERMINAL),[editing,setEditing]=useState<any>(null),[open,setOpen]=useState(false);
+  async function load(){
+    const params=new URLSearchParams({channel});if(search)params.set("search",search);if(productType)params.set("product_type",productType);
+    const response=await fetch(API+"/terminals?"+params);setData(await response.json());
+  }
+  useEffect(()=>{const timer=setTimeout(load,150);const refresh=setInterval(load,30000);return()=>{clearTimeout(timer);clearInterval(refresh)}},[channel,search,productType]);
+  const counts=useMemo(()=>Object.fromEntries(TERMINAL_BANDS.map(value=>[value,data.items.filter((item:any)=>item.customer_band===value).length])),[data.items]);
+  const brands=useMemo(()=>Array.from(new Set(data.items.map((item:any)=>item.brand).filter(Boolean))).sort() as string[],[data.items]);
+  const visible=data.items.filter((item:any)=>(channel!=="CB"||item.customer_band===band)&&(!brand||item.brand===brand));
+  async function inspectExcel(selected:File|null){
+    if(!selected)return;setBusy(true);setMessage("");setFile(selected);
+    const body=new FormData();body.append("file",selected);
+    const response=await fetch(API+"/terminals-ga/sheets",{method:"POST",body});const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"File non leggibile");return}
+    setSheets(result.sheets);setSheet(result.sheets[0]||"");
+  }
+  async function importExcel(){
+    if(!file||!sheet)return;setBusy(true);const body=new FormData();body.append("file",file);body.append("sheet_name",sheet);
+    const response=await fetch(API+"/terminals-ga/import",{method:"POST",body});const result=await response.json();setBusy(false);
+    if(!response.ok){setMessage(result.detail||"Importazione non riuscita");return}
+    setMessage(`Importati ${result.imported} terminali${result.skipped.length?` · ${result.skipped.length} righe scartate`:""}.`);setSheets([]);setFile(null);load();
+  }
+  function startNew(){setEditing(null);setForm({...EMPTY_TERMINAL,customer_band:band});setOpen(true);setMessage("")}
+  function startEdit(item:any){setEditing(item);setForm({...item});setOpen(true);setMessage("")}
+  async function save(event:React.FormEvent){
+    event.preventDefault();const response=await fetch(editing?API+"/terminals-cb/"+editing.id:API+"/terminals-cb",{method:editing?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(form)});
+    const result=await response.json();if(!response.ok){setMessage(result.detail||"Salvataggio non riuscito");return}setOpen(false);load();
+  }
+  async function remove(item:any){if(!confirm(`Eliminare ${item.brand} ${item.model}?`))return;await fetch(API+"/terminals-cb/"+item.id,{method:"DELETE"});load()}
+  async function clearBand(){if(!confirm(`Eliminare tutti i terminali della fascia ${band}?`))return;await fetch(API+"/terminals-cb?customer_band="+band,{method:"DELETE"});load()}
+  async function resetDefaults(){if(!confirm("Ripristinare la matrice predefinita? Tutto il listino CB attuale sarà sostituito."))return;await fetch(API+"/terminals-cb/reset",{method:"POST"});load()}
+  const money=(value:number)=>new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR"}).format(value||0);
+  return <main className="page">
+    <div className="title"><div><small>CATALOGO COMMERCIALE</small><h1>Terminali GA e CB</h1><p>Condizioni terminali per nuove attivazioni e clienti in base alla fascia commerciale.</p></div><div className="titleactions">{channel==="GA"?<><a className="secondary" href={API+"/terminals-ga.pdf?search="+encodeURIComponent(search)} target="_blank"><FileText/>Esporta PDF</a><label className="secondary uploadbutton"><UploadCloud/>{busy?"Lettura…":"Importa Excel"}<input type="file" accept=".xlsx,.xlsm,.xls" onChange={e=>inspectExcel(e.target.files?.[0]||null)}/></label></>:<><button className="secondary" onClick={resetDefaults}><History/>Ripristina matrice</button><button className="new" onClick={startNew}><Plus/>Nuovo terminale</button></>}</div></div>
+    <div className="segmenttabs"><button className={channel==="GA"?"active":""} onClick={()=>setChannel("GA")}>GA · Nuove attivazioni</button><button className={channel==="CB"?"active":""} onClick={()=>setChannel("CB")}>CB · Clienti</button></div>
+    {sheets.length>0&&<section className="importSheet"><div><b>{file?.name}</b><span>Scegli il foglio che contiene il listino terminali.</span></div><select value={sheet} onChange={e=>setSheet(e.target.value)}>{sheets.map(value=><option key={value}>{value}</option>)}</select><button className="new" disabled={busy} onClick={importExcel}>{busy?"Importazione…":"Conferma importazione"}</button><button className="icon" onClick={()=>setSheets([])}>×</button></section>}
+    {message&&<div className="notice ok"><CheckCircle2/>{message}</div>}
+    {channel==="CB"&&<div className="bandtabs">{TERMINAL_BANDS.map(value=><button className={band===value?"active":""} onClick={()=>setBand(value)} key={value}><span>{value}</span><b>{counts[value]||0}</b></button>)}</div>}
+    <div className="toolbar"><label className="searchbox"><Search/><input placeholder="Cerca modello, marca, GSI o offerta…" value={search} onChange={e=>setSearch(e.target.value)}/></label><select value={productType} onChange={e=>setProductType(e.target.value)}><option value="">Tutte le tipologie</option>{TERMINAL_TYPES.map(value=><option key={value}>{value}</option>)}</select>{channel==="CB"&&<select value={brand} onChange={e=>setBrand(e.target.value)}><option value="">Tutte le marche</option>{brands.map(value=><option key={value}>{value}</option>)}</select>}{channel==="GA"&&<span className="catalogMeta">{data.metadata?`${data.metadata.row_count} righe · ${new Date(data.metadata.updated_at).toLocaleString("it-IT")}`:"Nessun listino importato"}</span>}{channel==="CB"&&<button className="dangerbtn clearBand" onClick={clearBand}><Trash2/>Svuota {band}</button>}</div>
+    <div className="tablewrap terminalTable"><table><thead><tr><th>Terminale</th><th>GSI</th>{channel==="GA"?<><th>Offerta / Promozione</th><th>Listino</th><th>Anticipo</th><th>Rata mensile</th><th>Rata finale</th><th>Kasko</th><th>Sconto</th></>:<><th>Tipologia</th><th>Fascia</th><th>Prezzo</th><th>Anticipo</th><th>Rata</th><th>Finale</th><th></th></>}</tr></thead><tbody>{visible.map((item:any)=><tr key={item.id}><td><b>{item.brand&&`${item.brand} `}{item.model}</b><small>{item.memory}</small></td><td><code>{item.gsi_code}</code></td>{channel==="GA"?<><td><b>{item.offer_name||"—"}</b><small>{item.promotion_name||item.promotion_id}</small></td><td>{money(item.list_price)}</td><td>{money(item.upfront)}</td><td><b>{money(item.monthly_installment)}</b><small>standard {money(item.standard_installment)}</small></td><td>{money(item.final_installment)}</td><td>{money(item.kasko)}<small>Premium {money(item.kasko_premium)}</small></td><td>{item.discount_percent}%</td></>:<><td>{item.product_type}</td><td><span className="bandBadge">{item.customer_band}</span></td><td>{money(item.list_price)}</td><td>{money(item.upfront)}</td><td><b>{money(item.monthly_installment)}</b></td><td>{money(item.final_installment)}</td><td><button className="icon" onClick={()=>startEdit(item)}><Pencil/></button><button className="icon danger" onClick={()=>remove(item)}><Trash2/></button></td></>}</tr>)}</tbody></table>{!visible.length&&<Empty icon={<Smartphone/>} text={channel==="GA"?"Importa il listino Excel GA":"Nessun terminale per questa fascia"}/>}</div>
+    {open&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setOpen(false)}}><form className="drawer terminalForm" onSubmit={save}><button type="button" className="close" onClick={()=>setOpen(false)}>×</button><small>LISTINO CLIENTI CB</small><h2>{editing?"Modifica terminale":"Nuovo terminale"}</h2><div className="fieldgrid"><label>Marca<input required value={form.brand} onChange={e=>setForm({...form,brand:e.target.value})}/></label><label>Modello<input required value={form.model} onChange={e=>setForm({...form,model:e.target.value})}/></label><label>Memoria<input value={form.memory||""} onChange={e=>setForm({...form,memory:e.target.value})}/></label><label>Codice GSI<input required value={form.gsi_code} onChange={e=>setForm({...form,gsi_code:e.target.value})}/></label><label>Tipologia<select value={form.product_type} onChange={e=>setForm({...form,product_type:e.target.value})}>{TERMINAL_TYPES.map(value=><option key={value}>{value}</option>)}</select></label><label>Fascia cliente<select value={form.customer_band} onChange={e=>setForm({...form,customer_band:e.target.value})}>{TERMINAL_BANDS.map(value=><option key={value}>{value}</option>)}</select></label></div><h3>Condizioni economiche</h3><div className="fieldgrid">{[["list_price","Prezzo di riferimento"],["upfront","Anticipo"],["monthly_installment","Rata mensile"],["final_installment","Rata finale"]].map(([key,label])=><label key={key}>{label}<input type="number" min="0" step=".01" value={form[key]} onChange={e=>setForm({...form,[key]:Number(e.target.value)})}/></label>)}</div>{message&&<div className="notice error"><XCircle/>{message}</div>}<div className="formactions"><button className="new">Salva terminale</button></div></form></div>}
   </main>
 }
 

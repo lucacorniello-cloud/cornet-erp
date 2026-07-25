@@ -170,7 +170,15 @@ ALIASES = {
     "status": ["STATO_MSISDN_MESE_0", "STATO_LINEA", "STATO_ASSET", "STATO"],
     "monthly_fee": ["CANONE_ATTUALIZZATO", "CANONE_SIM", "CANONE_LINEA", "CANONE_ACCESSO", "CANONE"],
     "iccid": ["ICCID", "SERIALE_SIM"],
-    "activation_date": ["DATA_ATTIVAZIONE", "DATA_ATTIVAZIONE_LINEA", "DATA_INIZIO", "DATA_DECORRENZA"],
+    "activation_date": [
+        "DATA_ATTIVAZIONE",
+        "DATA_ATTIVAZIONE_LINEA",
+        "DATA_ATTIVAZIONE_MSISDN",
+        "DATA_ATTIVAZIONE_ASSET",
+        "DATA_INIZIO",
+        "DATA_INIZIO_VALIDITA",
+        "DATA_DECORRENZA",
+    ],
 }
 SIGNIFICANT_FIELDS = {
     "DATA_ATTIVAZIONE",
@@ -235,13 +243,43 @@ def parse_monthly_fee(value: Any) -> float:
         return 0.0
 
 
+def readable_field_name(key: str) -> str:
+    return key.replace("_", " ").strip().title()
+
+
+def find_activation_date(raw_data: dict[str, Any] | None) -> str:
+    raw_data = raw_data or {}
+    direct = pick(raw_data, "activation_date")
+    if direct:
+        return direct
+    for key, value in raw_data.items():
+        tokens = set(key.upper().split("_"))
+        is_date = "DATA" in tokens or key.upper().startswith("DT_")
+        is_activation = bool(tokens & {"ATTIVAZIONE", "ATTIV", "DECORRENZA"}) or (
+            "INIZIO" in tokens and bool(tokens & {"VALIDITA", "SERVIZIO", "LINEA", "CONTRATTO"})
+        )
+        if is_date and is_activation and clean(value):
+            return clean(value)
+    return ""
+
+
 def asset_details(raw_data: dict[str, Any] | None) -> list[dict[str, str]]:
     raw_data = raw_data or {}
-    return [
+    details = [
         {"key": key, "label": label, "value": clean(raw_data.get(key))}
         for key, label in ASSET_DETAIL_FIELDS.items()
         if clean(raw_data.get(key))
     ]
+    known_keys = {detail["key"] for detail in details}
+    for key, value in raw_data.items():
+        upper = key.upper()
+        if key in known_keys or not clean(value):
+            continue
+        if ("DATA" in upper or upper.startswith("DT_")) and any(
+            token in upper for token in ("ATTIV", "DECORRENZA", "INIZIO_VALIDITA")
+        ):
+            details.append({"key": key, "label": readable_field_name(key), "value": clean(value)})
+    return details
 
 
 def find_header(sheet) -> tuple[int, list[str]]:
@@ -293,7 +331,7 @@ def parse_workbook(contents: bytes) -> list[dict[str, Any]]:
                 "plan": pick(raw, "plan"),
                 "status": pick(raw, "status"),
                 "monthly_fee": pick(raw, "monthly_fee"),
-                "activation_date": pick(raw, "activation_date"),
+                "activation_date": find_activation_date(raw),
                 "raw": raw,
                 "campaigns": campaigns,
             }
@@ -521,7 +559,7 @@ def customer_detail(customer_id: uuid.UUID):
                     "plan": row.current_plan,
                     "status": row.current_status,
                     "monthly_fee": row.monthly_fee,
-                    "activation_date": pick(row.raw_data or {}, "activation_date"),
+                    "activation_date": find_activation_date(row.raw_data),
                     "details": asset_details(row.raw_data),
                     "campaigns": row.campaigns,
                 }

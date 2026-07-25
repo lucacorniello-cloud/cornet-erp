@@ -3,7 +3,7 @@ import unittest
 
 from openpyxl import Workbook
 
-from app.main import asset_details, build_preview, parse_monthly_fee, parse_workbook
+from app.main import asset_details, build_preview, find_activation_date, parse_monthly_fee, parse_workbook
 
 
 class WindTreParserTests(unittest.TestCase):
@@ -83,6 +83,16 @@ class WindTreParserTests(unittest.TestCase):
                 {"key": "DATA_ATTIVAZIONE", "label": "Data attivazione", "value": "15/06/2025"},
                 {"key": "DESCRIZIONE_TERMINALE", "label": "Terminale", "value": "Apple iPhone"},
             ],
+        )
+
+    def test_finds_activation_date_from_windtre_header_variants(self):
+        self.assertEqual(find_activation_date({"DATA_ATTIVAZIONE_MSISDN": "15/06/2025"}), "15/06/2025")
+        self.assertEqual(find_activation_date({"DT_ATTIVAZIONE_LINEA": "01/07/2024"}), "01/07/2024")
+        self.assertEqual(find_activation_date({"DATA_INIZIO_VALIDITA": "10/01/2023"}), "10/01/2023")
+        details = asset_details({"DT_ATTIVAZIONE_LINEA": "01/07/2024"})
+        self.assertEqual(
+            details,
+            [{"key": "DT_ATTIVAZIONE_LINEA", "label": "Dt Attivazione Linea", "value": "01/07/2024"}],
         )
 
 

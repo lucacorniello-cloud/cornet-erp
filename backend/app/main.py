@@ -170,8 +170,11 @@ ALIASES = {
     "status": ["STATO_MSISDN_MESE_0", "STATO_LINEA", "STATO_ASSET", "STATO"],
     "monthly_fee": ["CANONE_ATTUALIZZATO", "CANONE_SIM", "CANONE_LINEA", "CANONE_ACCESSO", "CANONE"],
     "iccid": ["ICCID", "SERIALE_SIM"],
+    "activation_date": ["DATA_ATTIVAZIONE", "DATA_ATTIVAZIONE_LINEA", "DATA_INIZIO", "DATA_DECORRENZA"],
 }
 SIGNIFICANT_FIELDS = {
+    "DATA_ATTIVAZIONE",
+    "DATA_ATTIVAZIONE_LINEA",
     "PIANO_TARIFFARIO_ATTUALE",
     "OPZIONE_ATTIVA",
     "TIPO_PACCHETTO_DATI",
@@ -191,6 +194,23 @@ SIGNIFICANT_FIELDS = {
     "CLUSTER_VALORE_CLIENTE",
     "I_CREDIT_SCORE",
 }
+ASSET_DETAIL_FIELDS = {
+    "DATA_ATTIVAZIONE": "Data attivazione",
+    "DATA_ATTIVAZIONE_LINEA": "Data attivazione linea",
+    "ICCID": "ICCID",
+    "OPZIONE_ATTIVA": "Opzione attiva",
+    "TIPO_PACCHETTO_DATI": "Pacchetto dati",
+    "DESCRIZIONE_TERMINALE": "Terminale",
+    "NUM_LICENZE_MKP": "Numero licenze",
+    "DES_LICENZA_MKP": "Licenza Marketplace",
+    "DES_PRODOTTO_MKP": "Prodotto Marketplace",
+    "FLAG_OPZIONE_CONVERGENZA": "Convergenza",
+    "OPZIONE_ITZ": "Opzione internazionale",
+    "FLAG_OFFICE_SMART": "Office Smart",
+    "COPERTURA_ACCESSO": "Copertura accesso",
+    "CLUSTER_VALORE_CLIENTE": "Cluster cliente",
+    "I_CREDIT_SCORE": "Credit score",
+}
 
 
 def pick(row: dict[str, str], field: str) -> str:
@@ -198,6 +218,30 @@ def pick(row: dict[str, str], field: str) -> str:
         if row.get(name):
             return row[name]
     return ""
+
+
+def parse_monthly_fee(value: Any) -> float:
+    normalized = clean(value).replace("€", "").replace(" ", "")
+    if not normalized:
+        return 0.0
+    if "," in normalized and "." in normalized:
+        normalized = normalized.replace(".", "").replace(",", ".")
+    elif "," in normalized:
+        normalized = normalized.replace(",", ".")
+    normalized = re.sub(r"[^0-9.\-]", "", normalized)
+    try:
+        return round(float(normalized), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def asset_details(raw_data: dict[str, Any] | None) -> list[dict[str, str]]:
+    raw_data = raw_data or {}
+    return [
+        {"key": key, "label": label, "value": clean(raw_data.get(key))}
+        for key, label in ASSET_DETAIL_FIELDS.items()
+        if clean(raw_data.get(key))
+    ]
 
 
 def find_header(sheet) -> tuple[int, list[str]]:
@@ -249,6 +293,7 @@ def parse_workbook(contents: bytes) -> list[dict[str, Any]]:
                 "plan": pick(raw, "plan"),
                 "status": pick(raw, "status"),
                 "monthly_fee": pick(raw, "monthly_fee"),
+                "activation_date": pick(raw, "activation_date"),
                 "raw": raw,
                 "campaigns": campaigns,
             }
@@ -396,6 +441,25 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                 )
             )
         items = db.scalars(query).all()
+        latest_import = db.scalar(
+            select(WindTreImport)
+            .order_by(WindTreImport.competence_month.desc(), WindTreImport.uploaded_at.desc())
+            .limit(1)
+        )
+        monthly_spend_by_customer: dict[uuid.UUID, float] = {}
+        if latest_import and items:
+            current_rows = db.scalars(
+                select(WindTreImportRow).where(
+                    WindTreImportRow.import_id == latest_import.id,
+                    WindTreImportRow.customer_id.in_([item.id for item in items]),
+                )
+            ).all()
+            for row in current_rows:
+                if row.customer_id:
+                    monthly_spend_by_customer[row.customer_id] = round(
+                        monthly_spend_by_customer.get(row.customer_id, 0) + parse_monthly_fee(row.monthly_fee),
+                        2,
+                    )
         return [
             {
                 "id": str(item.id),
@@ -407,6 +471,7 @@ def customers(search: str = "", segment: str | None = None, limit: int = Query(1
                 "portfolio_status": item.portfolio_status,
                 "first_seen_month": item.first_seen_month,
                 "last_seen_month": item.last_seen_month,
+                "monthly_spend": monthly_spend_by_customer.get(item.id, 0),
             }
             for item in items
         ]
@@ -435,6 +500,7 @@ def customer_detail(customer_id: uuid.UUID):
             if latest_import
             else []
         )
+        monthly_spend = round(sum(parse_monthly_fee(row.monthly_fee) for row in latest_rows), 2)
         return {
             "id": str(customer.id),
             "business_name": customer.business_name,
@@ -446,6 +512,7 @@ def customer_detail(customer_id: uuid.UUID):
             "first_seen_month": customer.first_seen_month,
             "last_seen_month": customer.last_seen_month,
             "snapshot_month": latest_import.competence_month if latest_import else None,
+            "monthly_spend": monthly_spend,
             "assets": [
                 {
                     "asset_key": row.asset_key,
@@ -454,6 +521,8 @@ def customer_detail(customer_id: uuid.UUID):
                     "plan": row.current_plan,
                     "status": row.current_status,
                     "monthly_fee": row.monthly_fee,
+                    "activation_date": pick(row.raw_data or {}, "activation_date"),
+                    "details": asset_details(row.raw_data),
                     "campaigns": row.campaigns,
                 }
                 for row in latest_rows[-100:]

@@ -3,7 +3,7 @@ import unittest
 
 from openpyxl import Workbook
 
-from app.main import build_preview, parse_workbook
+from app.main import asset_details, build_preview, parse_monthly_fee, parse_workbook
 
 
 class WindTreParserTests(unittest.TestCase):
@@ -18,6 +18,8 @@ class WindTreParserTests(unittest.TestCase):
                 "MSISDN",
                 "PIANO_TARIFFARIO_ATTUALE",
                 "CANONE_SIM",
+                "DATA_ATTIVAZIONE",
+                "DESCRIZIONE_TERMINALE",
                 "V_SMARTPHONE",
                 "V_SIM_RINNOVABILI",
             ]
@@ -30,6 +32,8 @@ class WindTreParserTests(unittest.TestCase):
                 "3931111111",
                 "Business Unlimited",
                 15.90,
+                "15/06/2025",
+                "Apple iPhone",
                 "Y_PREMIUM",
                 "Y_11E",
             ]
@@ -62,6 +66,24 @@ class WindTreParserTests(unittest.TestCase):
         self.assertEqual(preview["quality"]["duplicate_asset_rows"], 0)
         self.assertEqual(preview["sample_rows"][0]["business_name"], "Rossi SRL")
         self.assertIn("V_SMARTPHONE", preview["campaign_names"])
+
+    def test_normalizes_monthly_fee_and_asset_details(self):
+        self.assertEqual(parse_monthly_fee("1.234,56 €"), 1234.56)
+        self.assertEqual(parse_monthly_fee("15.9"), 15.9)
+        details = asset_details(
+            {
+                "DATA_ATTIVAZIONE": "15/06/2025",
+                "DESCRIZIONE_TERMINALE": "Apple iPhone",
+                "CAMPO_NON_GESTITO": "valore",
+            }
+        )
+        self.assertEqual(
+            details,
+            [
+                {"key": "DATA_ATTIVAZIONE", "label": "Data attivazione", "value": "15/06/2025"},
+                {"key": "DESCRIZIONE_TERMINALE", "label": "Terminale", "value": "Apple iPhone"},
+            ],
+        )
 
 
 if __name__ == "__main__":

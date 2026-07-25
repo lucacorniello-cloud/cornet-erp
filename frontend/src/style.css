@@ -135,6 +135,10 @@
 .customerfacts>div,.assetdata>div{background:#f7f8fb;border-radius:10px;padding:12px;display:grid;gap:4px}
 .customerfacts span,.assetdata span{color:#858d9c;font-size:9px;text-transform:uppercase;letter-spacing:.6px}
 .customerfacts b,.assetdata b{font-size:13px}
+.spendfact{grid-column:1/-1;background:linear-gradient(110deg,#1a2039,#29225a)!important;color:#fff}
+.spendfact span{color:#b9c0d5!important}
+.spendfact b{font-size:22px}
+.money{color:#4d3ed0}
 .assetlist{display:grid;gap:11px}
 .assetcard{border:1px solid #e4e7ee;border-radius:14px;padding:15px;background:#fff;box-shadow:0 5px 16px #1f273c08}
 .assethead{display:flex;align-items:center;gap:11px}
@@ -143,7 +147,11 @@
 .assethead h3{margin:3px 0;font-size:17px}
 .asseticon{width:39px;height:39px;border-radius:11px;display:grid;place-items:center;background:#f0edff;color:#6757e8}
 .asseticon svg{width:19px}
-.assetdata{display:grid;grid-template-columns:1.4fr .6fr .7fr;gap:8px;margin-top:12px}
+.assetdata{display:grid;grid-template-columns:1.4fr .6fr .8fr .7fr;gap:8px;margin-top:12px}
+.assetdetails{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:8px}
+.assetdetails>div{border:1px solid #e9ebf1;border-radius:9px;padding:9px;display:grid;gap:3px}
+.assetdetails span{font-size:9px;color:#858d9c;text-transform:uppercase;letter-spacing:.5px}
+.assetdetails b{font-size:11px;word-break:break-word}
 .campaignchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
 .campaignchips span{background:#f4f2ff;color:#594bc8;border:1px solid #e3defe;border-radius:999px;padding:5px 8px;font-size:10px}
-@media(max-width:650px){.customerfacts,.assetdata{grid-template-columns:1fr}}
+@media(max-width:650px){.customerfacts,.assetdata,.assetdetails{grid-template-columns:1fr}}

@@ -117,7 +117,7 @@ function Customers(){
   return <main className="page">
     <div className="title"><div><small>CRM · BUSINESS SME</small><h1>Portafoglio clienti</h1><p>Clienti consolidati dalle estrazioni mensili WINDTRE.</p></div></div>
     <div className="toolbar"><div className="inputsearch"><Search size={17}/><input placeholder="Ragione sociale, P.IVA, codice cliente..." value={search} onChange={e=>setSearch(e.target.value)}/></div><span>{items.length} clienti</span></div>
-    <article className="tablecard">{loading?<div className="loading">Caricamento…</div>:items.length?<table><thead><tr><th>Cliente</th><th>Codice WINDTRE</th><th>P.IVA / C.F.</th><th>Ultima presenza</th><th>Stato</th><th></th></tr></thead><tbody>{items.map(c=><tr key={c.id} className="customerrow" onClick={()=>openCustomer(c.id)}><td><b>{c.business_name}</b><small>Business SME</small></td><td>{c.windtre_customer_code||"—"}</td><td>{c.tax_id||c.fiscal_code||"—"}</td><td>{c.last_seen_month?monthLabel(c.last_seen_month):"—"}</td><td><Status value={c.portfolio_status}/></td><td><button className="linkbtn" onClick={event=>{event.stopPropagation();openCustomer(c.id)}}>Utenze</button></td></tr>)}</tbody></table>:<Empty icon={<Users/>} text="I clienti compariranno dopo la prima importazione"/>}</article>
+    <article className="tablecard">{loading?<div className="loading">Caricamento…</div>:items.length?<table><thead><tr><th>Cliente</th><th>Codice WINDTRE</th><th>P.IVA / C.F.</th><th>Spesa mensile</th><th>Ultima presenza</th><th>Stato</th><th></th></tr></thead><tbody>{items.map(c=><tr key={c.id} className="customerrow" onClick={()=>openCustomer(c.id)}><td><b>{c.business_name}</b><small>Business SME</small></td><td>{c.windtre_customer_code||"—"}</td><td>{c.tax_id||c.fiscal_code||"—"}</td><td><b className="money">{formatCurrency(c.monthly_spend)}</b></td><td>{c.last_seen_month?monthLabel(c.last_seen_month):"—"}</td><td><Status value={c.portfolio_status}/></td><td><button className="linkbtn" onClick={event=>{event.stopPropagation();openCustomer(c.id)}}>Utenze</button></td></tr>)}</tbody></table>:<Empty icon={<Users/>} text="I clienti compariranno dopo la prima importazione"/>}</article>
     {selected&&<CustomerDetail item={selected} close={()=>setSelected(null)}/>}
   </main>;
 }
@@ -131,11 +131,13 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
         <div><span>Codice WINDTRE</span><b>{item.windtre_customer_code||"—"}</b></div>
         <div><span>P.IVA / C.F.</span><b>{item.tax_id||item.fiscal_code||"—"}</b></div>
         <div><span>Fotografia portafoglio</span><b>{item.snapshot_month?monthLabel(item.snapshot_month):"—"}</b></div>
+        <div className="spendfact"><span>Spesa mensile complessiva</span><b>{formatCurrency(item.monthly_spend)}</b></div>
       </div>
       <div className="sectiontitle"><div><FileSpreadsheet/><h2>Utenze e servizi</h2></div><span>{item.assets?.length||0} elementi</span></div>
       {item.assets?.length?<div className="assetlist">{item.assets.map((asset:any)=><article className="assetcard" key={asset.asset_key}>
         <div className="assethead"><div className="asseticon"><BriefcaseBusiness/></div><div><small>{asset.asset_type||"UTENZA WINDTRE"}</small><h3>{asset.asset_number||asset.asset_key}</h3></div><Status value={asset.status==="ACTIVE"?"ACTIVE":item.portfolio_status}/></div>
-        <div className="assetdata"><div><span>Piano / offerta</span><b>{asset.plan||"Non indicato"}</b></div><div><span>Canone</span><b>{asset.monthly_fee?`${asset.monthly_fee} €`:"—"}</b></div><div><span>Stato DB Tool</span><b>{asset.status||"—"}</b></div></div>
+        <div className="assetdata"><div><span>Piano / offerta</span><b>{asset.plan||"Non indicato"}</b></div><div><span>Canone</span><b>{asset.monthly_fee?formatCurrency(asset.monthly_fee):"—"}</b></div><div><span>Data attivazione</span><b>{formatDate(asset.activation_date)}</b></div><div><span>Stato DB Tool</span><b>{asset.status||"—"}</b></div></div>
+        {asset.details?.length>0&&<div className="assetdetails">{asset.details.map((detail:any)=><div key={detail.key}><span>{detail.label}</span><b>{detail.value}</b></div>)}</div>}
         {Object.keys(asset.campaigns||{}).length>0&&<div className="campaignchips">{Object.entries(asset.campaigns).map(([name,value]:any)=><span key={name}><b>{name}</b> {value}</span>)}</div>}
       </article>)}</div>:<Empty icon={<FileSpreadsheet/>} text="Nessuna utenza nell’ultima estrazione"/>}
       {campaigns.length>0&&<p className="previewnote">{campaigns.length} campagne distinte rilevate sulle utenze del cliente.</p>}
@@ -228,5 +230,7 @@ function Empty({icon,text}:{icon:React.ReactNode;text:string}){return <div class
 function Status({value}:{value:string}){return <span className={"badge "+(value==="ACTIVE"?"active":"missing")}>{value==="ACTIVE"?"Presente":"Da verificare"}</span>}
 function monthLabel(value:string){if(!value)return"—";const [y,m]=value.split("-");return new Intl.DateTimeFormat("it-IT",{month:"long",year:"numeric"}).format(new Date(Number(y),Number(m)-1,1))}
 function changeLabel(value:string){return({NEW_CUSTOMER:"Nuovi clienti",MISSING_CUSTOMER:"Clienti non più presenti",NEW_ASSET:"Nuovi asset",REMOVED_ASSET:"Asset non più presenti",FIELD_CHANGED:"Variazioni servizi",CAMPAIGN_ENTERED:"Ingresso campagne",CAMPAIGN_EXITED:"Uscita campagne",CAMPAIGN_CHANGED:"Variazione campagne"} as any)[value]||value}
+function formatCurrency(value:any){let normalized=String(value??"").replace("€","").replace(/\s/g,"");if(normalized.includes(",")&&normalized.includes("."))normalized=normalized.replace(/\./g,"").replace(",",".");else normalized=normalized.replace(",",".");const numeric=typeof value==="number"?value:Number(normalized);return Number.isFinite(numeric)?new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR"}).format(numeric):"—"}
+function formatDate(value:any){if(!value)return"—";const parsed=new Date(value);return Number.isNaN(parsed.getTime())?String(value):new Intl.DateTimeFormat("it-IT").format(parsed)}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<App/>);

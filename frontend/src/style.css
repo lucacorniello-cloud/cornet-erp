@@ -19,6 +19,7 @@
 .brand{display:flex;align-items:center;gap:11px;margin-bottom:28px}
 .brand>div:last-child{display:grid}
 .brand small{color:#80899e;font-size:9px;letter-spacing:1.3px;margin-top:2px}
+.storelogo{width:40px;height:40px;object-fit:contain;border-radius:11px;background:#fff;padding:3px}
 .shell nav{display:grid;gap:6px}
 .shell nav button{border:0;background:transparent;padding:11px 12px;border-radius:10px;color:#aeb4c6;display:flex;align-items:center;gap:11px;text-align:left}
 .shell nav button svg{width:18px}
@@ -155,3 +156,22 @@
 .campaignchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
 .campaignchips span{background:#f4f2ff;color:#594bc8;border:1px solid #e3defe;border-radius:999px;padding:5px 8px;font-size:10px}
 @media(max-width:650px){.customerfacts,.assetdata,.assetdetails{grid-template-columns:1fr}}
+.settingsgrid{display:grid;grid-template-columns:280px 1fr;gap:16px;margin-top:22px;align-items:start}
+.logocard,.settingsform{background:#fff;border:1px solid #e3e7ee;border-radius:16px;padding:20px;box-shadow:0 7px 22px #1f273c0a}
+.logocard{text-align:center;position:sticky;top:92px}
+.logocard h2{font-size:18px;margin:14px 0 5px}
+.logocard p{font-size:12px;color:#7e8797}
+.logopreview{height:170px;border-radius:14px;background:linear-gradient(145deg,#f5f3ff,#eef1f7);display:grid;place-items:center;color:#7363ee}
+.logopreview img{width:100%;height:100%;object-fit:contain;padding:20px}
+.logopreview svg{width:48px;height:48px}
+.uploadbutton{display:inline-flex;position:relative;overflow:hidden;cursor:pointer;margin-top:8px}
+.uploadbutton input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.settingsform{padding:26px}
+.formsection h2{margin:0 0 18px;font-size:21px}
+.fieldgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.fieldgrid label{display:grid;gap:7px;font-size:12px;font-weight:750;color:#4f586a}
+.fieldgrid input{border:1px solid #dfe3eb;border-radius:10px;padding:12px;background:#fff;outline:0}
+.fieldgrid input:focus{border-color:#7565ec;box-shadow:0 0 0 3px #7565ec18}
+.formactions{display:flex;justify-content:flex-end;margin-top:20px}
+.formactions .new{border:0}
+@media(max-width:850px){.settingsgrid{grid-template-columns:1fr}.logocard{position:static}.fieldgrid{grid-template-columns:1fr}}

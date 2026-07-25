@@ -6,12 +6,14 @@ from hashlib import sha256
 from io import BytesIO
 import json
 import os
+from pathlib import Path
 import re
 import uuid
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from jose import jwt
 from openpyxl import load_workbook
 from passlib.context import CryptContext
@@ -115,6 +117,30 @@ class WindTreChange(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class StoreSettings(Base):
+    __tablename__ = "store_settings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    store_name: Mapped[str] = mapped_column(String(255), default="Cornet Solutions")
+    legal_name: Mapped[str | None] = mapped_column(String(255))
+    tax_id: Mapped[str | None] = mapped_column(String(32))
+    fiscal_code: Mapped[str | None] = mapped_column(String(32))
+    dealer_code: Mapped[str | None] = mapped_column(String(80))
+    address: Mapped[str | None] = mapped_column(String(255))
+    city: Mapped[str | None] = mapped_column(String(120))
+    postal_code: Mapped[str | None] = mapped_column(String(12))
+    province: Mapped[str | None] = mapped_column(String(8))
+    phone: Mapped[str | None] = mapped_column(String(80))
+    whatsapp: Mapped[str | None] = mapped_column(String(80))
+    email: Mapped[str | None] = mapped_column(String(255))
+    website: Mapped[str | None] = mapped_column(String(255))
+    logo_path: Mapped[str | None] = mapped_column(String(500))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -123,6 +149,26 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class StoreSettingsRequest(BaseModel):
+    store_name: str
+    legal_name: str | None = None
+    tax_id: str | None = None
+    fiscal_code: str | None = None
+    dealer_code: str | None = None
+    address: str | None = None
+    city: str | None = None
+    postal_code: str | None = None
+    province: str | None = None
+    phone: str | None = None
+    whatsapp: str | None = None
+    email: str | None = None
+    website: str | None = None
+
+
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/uploads"))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def seed():
@@ -417,6 +463,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Cornet ERP API", version="0.2.0", lifespan=lifespan)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")],
@@ -429,6 +476,36 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok", "version": "0.2.0"}
+
+
+def serialize_store_settings(item: StoreSettings) -> dict[str, Any]:
+    return {
+        "id": str(item.id),
+        "store_name": item.store_name,
+        "legal_name": item.legal_name or "",
+        "tax_id": item.tax_id or "",
+        "fiscal_code": item.fiscal_code or "",
+        "dealer_code": item.dealer_code or "",
+        "address": item.address or "",
+        "city": item.city or "",
+        "postal_code": item.postal_code or "",
+        "province": item.province or "",
+        "phone": item.phone or "",
+        "whatsapp": item.whatsapp or "",
+        "email": item.email or "",
+        "website": item.website or "",
+        "logo_url": f"/uploads/{item.logo_path}" if item.logo_path else None,
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def get_or_create_store_settings(db) -> StoreSettings:
+    item = db.scalar(select(StoreSettings).limit(1))
+    if not item:
+        item = StoreSettings()
+        db.add(item)
+        db.flush()
+    return item
 
 
 @app.post("/api/v1/auth/login")
@@ -446,6 +523,53 @@ def login(data: LoginRequest):
             "access_token": token,
             "user": {"id": str(user.id), "email": user.email, "full_name": user.full_name, "role": user.role},
         }
+
+
+@app.get("/api/v1/settings/store")
+def store_settings():
+    with SessionLocal() as db:
+        item = get_or_create_store_settings(db)
+        db.commit()
+        db.refresh(item)
+        return serialize_store_settings(item)
+
+
+@app.put("/api/v1/settings/store")
+def update_store_settings(data: StoreSettingsRequest):
+    if not data.store_name.strip():
+        raise HTTPException(422, "Il nome del punto vendita è obbligatorio")
+    with SessionLocal() as db:
+        item = get_or_create_store_settings(db)
+        for field, value in data.model_dump().items():
+            setattr(item, field, value.strip() if isinstance(value, str) else value)
+        db.commit()
+        db.refresh(item)
+        return serialize_store_settings(item)
+
+
+@app.post("/api/v1/settings/store/logo")
+async def upload_store_logo(file: UploadFile = File(...)):
+    allowed_types = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+    extension = allowed_types.get(file.content_type or "")
+    if not extension:
+        raise HTTPException(422, "Carica un logo PNG, JPG o WEBP")
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Il logo supera il limite di 5 MB")
+    filename = f"store-logo{extension}"
+    target = UPLOAD_DIR / filename
+    target.write_bytes(contents)
+    with SessionLocal() as db:
+        item = get_or_create_store_settings(db)
+        previous = item.logo_path
+        item.logo_path = filename
+        db.commit()
+        db.refresh(item)
+        if previous and previous != filename:
+            previous_path = UPLOAD_DIR / previous
+            if previous_path.is_file():
+                previous_path.unlink()
+        return serialize_store_settings(item)
 
 
 @app.get("/api/v1/dashboard/summary")

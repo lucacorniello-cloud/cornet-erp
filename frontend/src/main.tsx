@@ -3,13 +3,13 @@ import ReactDOM from "react-dom/client";
 import {
   AlertTriangle, ArrowLeftRight, BriefcaseBusiness, Building2, CheckCircle2,
   FileClock, FileSpreadsheet, History, LayoutDashboard, LogOut, Search,
-  UploadCloud, Users, XCircle
+  Settings, Store, UploadCloud, Users, XCircle
 } from "lucide-react";
 import "./style.css";
 
 const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 
-type Page="dashboard"|"customers"|"imports";
+type Page="dashboard"|"customers"|"imports"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -52,13 +52,16 @@ function Login({done}:{done:(t:string)=>void}){
 
 function Workspace({logout}:{logout:()=>void}){
   const [page,setPage]=useState<Page>("dashboard");
+  const [store,setStore]=useState<any>(null);
+  useEffect(()=>{fetch(API+"/settings/store").then(r=>r.json()).then(setStore)},[]);
   return <div className="shell">
     <aside>
-      <div className="brand"><div className="logo small">C</div><div><b>Cornet ERP</b><small>Business Suite</small></div></div>
+      <div className="brand">{store?.logo_url?<img className="storelogo" src={assetUrl(store.logo_url)} alt="Logo punto vendita"/>:<div className="logo small">C</div>}<div><b>{store?.store_name||"Cornet ERP"}</b><small>Business Suite</small></div></div>
       <nav>
         <Nav active={page==="dashboard"} icon={<LayoutDashboard/>} onClick={()=>setPage("dashboard")}>Dashboard</Nav>
         <Nav active={page==="customers"} icon={<Users/>} onClick={()=>setPage("customers")}>Clienti</Nav>
         <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
+        <Nav active={page==="settings"} icon={<Settings/>} onClick={()=>setPage("settings")}>Configurazione</Nav>
       </nav>
       <div className="navfoot"><span>VERSIONE</span><b>0.2 · WINDTRE SME</b></div>
     </aside>
@@ -67,6 +70,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="dashboard"&&<Dashboard openImports={()=>setPage("imports")}/>}
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
+      {page==="settings"&&<StoreConfiguration value={store} saved={setStore}/>}
     </section>
   </div>;
 }
@@ -224,6 +228,57 @@ function ImportDetail({item,close}:{item:any;close:()=>void}){
   return <div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)close()}}><section className="drawer"><button className="close" onClick={close}>×</button><small>ESTRAZIONE {item.competence_month}</small><h2>{item.file_name}</h2><div className="miniKpis"><b>{item.customer_count}<span>Clienti</span></b><b>{item.new_customers}<span>Nuovi</span></b><b>{item.missing_customers}<span>Assenti</span></b><b>{item.campaign_changes}<span>Campagne</span></b></div>{grouped.length?grouped.map(([name,changes]:any)=><div className="changegroup" key={name}><h3>{changeLabel(name)} <span>{changes.length}</span></h3>{changes.slice(0,100).map((c:any)=><div className="change" key={c.id}><div><b>{c.customer_key}</b><small>{c.asset_key||"Cliente"}</small></div><div><strong>{c.field_name||changeLabel(c.change_type)}</strong><small>{c.old_value||"—"} → {c.new_value||"—"}</small></div></div>)}</div>):<Empty icon={<CheckCircle2/>} text="Prima fotografia acquisita: nessun mese precedente da confrontare"/>}</section></div>;
 }
 
+const STORE_FIELDS=[
+  ["store_name","Nome punto vendita","Cornet Solutions"],
+  ["legal_name","Ragione sociale","Ragione sociale completa"],
+  ["tax_id","Partita IVA",""],
+  ["fiscal_code","Codice fiscale",""],
+  ["dealer_code","Codice rivenditore",""],
+  ["address","Indirizzo","Via e numero civico"],
+  ["city","Comune",""],
+  ["postal_code","CAP",""],
+  ["province","Provincia","MI"],
+  ["phone","Telefono",""],
+  ["whatsapp","WhatsApp",""],
+  ["email","Email",""],
+  ["website","Sito internet","https://"],
+] as const;
+
+function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
+  const [form,setForm]=useState<any>(value||{store_name:"Cornet Solutions"});
+  const [message,setMessage]=useState<{kind:"ok"|"error";text:string}|null>(null);
+  const [busy,setBusy]=useState(false);
+  useEffect(()=>{if(value)setForm(value)},[value]);
+  async function submit(event:React.FormEvent){
+    event.preventDefault();setBusy(true);setMessage(null);
+    try{
+      const response=await fetch(API+"/settings/store",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.fromEntries(STORE_FIELDS.map(([key])=>[key,form[key]||""])))});
+      const result=await response.json();if(!response.ok)throw new Error(result.detail||"Salvataggio non riuscito");
+      setForm(result);saved(result);setMessage({kind:"ok",text:"Configurazione del punto vendita salvata."});
+    }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
+  }
+  async function uploadLogo(file:File|null){
+    if(!file)return;setBusy(true);setMessage(null);
+    const data=new FormData();data.append("file",file);
+    try{
+      const response=await fetch(API+"/settings/store/logo",{method:"POST",body:data});
+      const result=await response.json();if(!response.ok)throw new Error(result.detail||"Logo non caricato");
+      setForm(result);saved(result);setMessage({kind:"ok",text:"Logo aggiornato correttamente."});
+    }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
+  }
+  return <main className="page">
+    <div className="title"><div><small>IMPOSTAZIONI AZIENDALI</small><h1>Configurazione punto vendita</h1><p>Questi dati saranno utilizzati per documenti, preventivi, DDT e comunicazioni.</p></div></div>
+    <div className="settingsgrid">
+      <article className="logocard"><div className="logopreview">{form.logo_url?<img src={assetUrl(form.logo_url)} alt="Logo punto vendita"/>:<Store/>}</div><h2>Logo del negozio</h2><p>PNG, JPG o WEBP, massimo 5 MB.</p><label className="secondary uploadbutton">Scegli logo<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null)}/></label></article>
+      <form className="settingsform" onSubmit={submit}>
+        <div className="formsection"><h2>Dati del punto vendita</h2><div className="fieldgrid">{STORE_FIELDS.map(([key,label,placeholder])=><label key={key}>{label}<input value={form[key]||""} placeholder={placeholder} onChange={event=>setForm({...form,[key]:event.target.value})} required={key==="store_name"}/></label>)}</div></div>
+        {message&&<div className={"notice "+message.kind}>{message.kind==="ok"?<CheckCircle2/>:<XCircle/>}{message.text}</div>}
+        <div className="formactions"><button className="new" disabled={busy}>{busy?"Salvataggio…":"Salva configurazione"}</button></div>
+      </form>
+    </div>
+  </main>
+}
+
 function Card({label,value,icon}:{label:string;value:any;icon?:React.ReactNode}){return <article className="card">{icon}<span>{label}</span><strong>{value??"—"}</strong><small>Aggiornato ora</small></article>}
 function Metric({label,value,tone}:{label:string;value:number;tone:string}){return <div className="metric"><span className={tone}></span><b>{label}</b><strong>{value}</strong></div>}
 function Empty({icon,text}:{icon:React.ReactNode;text:string}){return <div className="empty">{icon}<b>{text}</b><span>Il contenuto sarà aggiornato automaticamente.</span></div>}
@@ -232,5 +287,6 @@ function monthLabel(value:string){if(!value)return"—";const [y,m]=value.split(
 function changeLabel(value:string){return({NEW_CUSTOMER:"Nuovi clienti",MISSING_CUSTOMER:"Clienti non più presenti",NEW_ASSET:"Nuovi asset",REMOVED_ASSET:"Asset non più presenti",FIELD_CHANGED:"Variazioni servizi",CAMPAIGN_ENTERED:"Ingresso campagne",CAMPAIGN_EXITED:"Uscita campagne",CAMPAIGN_CHANGED:"Variazione campagne"} as any)[value]||value}
 function formatCurrency(value:any){let normalized=String(value??"").replace("€","").replace(/\s/g,"");if(normalized.includes(",")&&normalized.includes("."))normalized=normalized.replace(/\./g,"").replace(",",".");else normalized=normalized.replace(",",".");const numeric=typeof value==="number"?value:Number(normalized);return Number.isFinite(numeric)?new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR"}).format(numeric):"—"}
 function formatDate(value:any){if(!value)return"—";const parsed=new Date(value);return Number.isNaN(parsed.getTime())?String(value):new Intl.DateTimeFormat("it-IT").format(parsed)}
+function assetUrl(path:string){return API.replace(/\/api\/v1$/,"")+path}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<App/>);

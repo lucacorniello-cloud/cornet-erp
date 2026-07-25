@@ -28,6 +28,8 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -259,6 +261,25 @@ class TariffPlan(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class LetterheadTemplate(Base):
+    __tablename__ = "letterhead_templates"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_name: Mapped[str] = mapped_column(String(255), default="Cornet Solutions")
+    company_address: Mapped[str | None] = mapped_column(String(500))
+    tax_id: Mapped[str | None] = mapped_column(String(80))
+    phone: Mapped[str | None] = mapped_column(String(100))
+    email: Mapped[str | None] = mapped_column(String(255))
+    pec: Mapped[str | None] = mapped_column(String(255))
+    website: Mapped[str | None] = mapped_column(String(255))
+    logo_url: Mapped[str | None] = mapped_column(String(500))
+    logo_size: Mapped[int] = mapped_column(Integer, default=80)
+    logo_horizontal: Mapped[str] = mapped_column(String(20), default="left")
+    logo_vertical: Mapped[str] = mapped_column(String(20), default="top")
+    recipient_offset_mm: Mapped[int] = mapped_column(Integer, default=0)
+    primary_color: Mapped[str] = mapped_column(String(20), default="#4f46e5")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class DdtShipmentSim(Base):
     __tablename__ = "ddt_shipment_sims"
     ddt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ddt_shipments.id", ondelete="CASCADE"), primary_key=True)
@@ -355,6 +376,30 @@ class TariffPlanRequest(BaseModel):
     international_included: bool = False
     international_countries: str | None = None
     custom_discounts: list[dict[str, Any]] = []
+
+
+class LetterheadTemplateRequest(BaseModel):
+    company_name: str
+    company_address: str | None = None
+    tax_id: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    pec: str | None = None
+    website: str | None = None
+    logo_url: str | None = None
+    logo_size: int = 80
+    logo_horizontal: str = "left"
+    logo_vertical: str = "top"
+    recipient_offset_mm: int = 0
+    primary_color: str = "#4f46e5"
+
+
+class LetterheadGenerateRequest(BaseModel):
+    mode: str = "A4"
+    customer_id: uuid.UUID | None = None
+    recipient_name: str
+    recipient_address: str
+    body_text: str | None = None
 
 
 class ProductRequest(BaseModel):
@@ -1095,6 +1140,152 @@ async def upload_partner_logo(file: UploadFile = File(...)):
             if previous_path.is_file():
                 previous_path.unlink()
         return serialize_store_settings(item)
+
+
+def get_or_create_letterhead(db) -> LetterheadTemplate:
+    item = db.scalar(select(LetterheadTemplate).limit(1))
+    if not item:
+        store = get_or_create_store_settings(db)
+        address = ", ".join(part for part in [store.address, " ".join(part for part in [store.postal_code, store.city] if part), store.province] if part)
+        item = LetterheadTemplate(
+            company_name=store.legal_name or store.store_name,
+            company_address=address, tax_id=store.tax_id or store.fiscal_code,
+            phone=store.phone, email=store.email, website=store.website,
+            logo_url=f"/uploads/{store.logo_path}" if store.logo_path else None,
+        )
+        db.add(item)
+        db.flush()
+    return item
+
+
+def serialize_letterhead(item: LetterheadTemplate) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "company_name": item.company_name, "company_address": item.company_address or "",
+        "tax_id": item.tax_id or "", "phone": item.phone or "", "email": item.email or "",
+        "pec": item.pec or "", "website": item.website or "", "logo_url": item.logo_url or "",
+        "logo_size": item.logo_size, "logo_horizontal": item.logo_horizontal, "logo_vertical": item.logo_vertical,
+        "recipient_offset_mm": item.recipient_offset_mm, "primary_color": item.primary_color,
+        "updated_at": item.updated_at.isoformat(),
+    }
+
+
+def validate_letterhead(data: LetterheadTemplateRequest):
+    if not data.company_name.strip():
+        raise HTTPException(422, "Il nome dell'azienda è obbligatorio")
+    if not 32 <= data.logo_size <= 160:
+        raise HTTPException(422, "La dimensione del logo deve essere compresa tra 32 e 160 px")
+    if data.logo_horizontal not in {"left", "center", "right"} or data.logo_vertical not in {"top", "center", "bottom"}:
+        raise HTTPException(422, "Allineamento logo non valido")
+    if not 0 <= data.recipient_offset_mm <= 100:
+        raise HTTPException(422, "L'offset destinatario deve essere compreso tra 0 e 100 mm")
+
+
+@app.get("/api/v1/letterhead-template")
+def letterhead_template():
+    with SessionLocal() as db:
+        item = get_or_create_letterhead(db)
+        db.commit()
+        db.refresh(item)
+        return serialize_letterhead(item)
+
+
+@app.put("/api/v1/letterhead-template")
+def update_letterhead_template(data: LetterheadTemplateRequest):
+    validate_letterhead(data)
+    with SessionLocal() as db:
+        item = get_or_create_letterhead(db)
+        for field, value in data.model_dump().items():
+            setattr(item, field, value.strip() if isinstance(value, str) else value)
+        db.commit()
+        db.refresh(item)
+        return serialize_letterhead(item)
+
+
+@app.post("/api/v1/letterhead-template/sync-store")
+def sync_letterhead_store():
+    with SessionLocal() as db:
+        store = get_or_create_store_settings(db)
+        item = get_or_create_letterhead(db)
+        item.company_name = store.legal_name or store.store_name
+        item.company_address = ", ".join(part for part in [store.address, " ".join(part for part in [store.postal_code, store.city] if part), store.province] if part)
+        item.tax_id, item.phone, item.email, item.website = store.tax_id or store.fiscal_code, store.phone, store.email, store.website
+        item.logo_url = f"/uploads/{store.logo_path}" if store.logo_path else item.logo_url
+        db.commit()
+        db.refresh(item)
+        return serialize_letterhead(item)
+
+
+def draw_wrapped_text(pdf, text: str, x: float, y: float, max_width: float, font: str = "Helvetica", size: int = 10, leading: int = 14):
+    pdf.setFont(font, size)
+    words, line, lines = text.split(), "", []
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        if pdf.stringWidth(candidate, font, size) <= max_width:
+            line = candidate
+        else:
+            if line:
+                lines.append(line)
+            line = word
+    if line:
+        lines.append(line)
+    for value in lines:
+        pdf.drawString(x, y, value)
+        y -= leading
+    return y
+
+
+@app.post("/api/v1/letterhead-template/pdf")
+def letterhead_pdf(data: LetterheadGenerateRequest):
+    if data.mode not in {"A4", "DL"}:
+        raise HTTPException(422, "Formato non valido")
+    if not data.recipient_name.strip() or not data.recipient_address.strip():
+        raise HTTPException(422, "Destinatario e indirizzo sono obbligatori")
+    with SessionLocal() as db:
+        item = get_or_create_letterhead(db)
+        page_size = A4 if data.mode == "A4" else (215 * mm, 110 * mm)
+        width, height = page_size
+        buffer = BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=page_size)
+        primary = colors.HexColor(item.primary_color if re.fullmatch(r"#[0-9A-Fa-f]{6}", item.primary_color or "") else "#4f46e5")
+        margin = 20 * mm if data.mode == "A4" else 10 * mm
+        logo_path = None
+        if item.logo_url and item.logo_url.startswith("/uploads/"):
+            candidate = UPLOAD_DIR / Path(item.logo_url).name
+            logo_path = candidate if candidate.is_file() else None
+        logo_height = min(item.logo_size * .264583 * mm, 35 * mm if data.mode == "A4" else 18 * mm)
+        logo_width = logo_height * 2.4
+        logo_x = margin if item.logo_horizontal == "left" else (width - logo_width) / 2 if item.logo_horizontal == "center" else width - margin - logo_width
+        logo_y = height - margin - logo_height if item.logo_vertical == "top" else (height - logo_height) / 2 if item.logo_vertical == "center" else margin + 15 * mm
+        if logo_path:
+            pdf.drawImage(ImageReader(str(logo_path)), logo_x, logo_y, width=logo_width, height=logo_height, preserveAspectRatio=True, anchor="c", mask="auto")
+        if data.mode == "A4":
+            company_y = height - margin - (logo_height + 5 * mm if logo_path and item.logo_horizontal == "left" else 3 * mm)
+            pdf.setFillColor(primary); pdf.setFont("Helvetica-Bold", 14); pdf.drawString(margin, company_y, item.company_name)
+            pdf.setStrokeColor(primary); pdf.setLineWidth(1.2); pdf.line(margin, company_y - 5 * mm, width - margin, company_y - 5 * mm)
+            recipient_x = max(margin, 118 * mm - item.recipient_offset_mm * mm)
+            recipient_y = height - 72 * mm
+            pdf.setFillColor(colors.black); pdf.setFont("Helvetica-Bold", 11); pdf.drawString(recipient_x, recipient_y, data.recipient_name)
+            draw_wrapped_text(pdf, data.recipient_address, recipient_x, recipient_y - 6 * mm, width - margin - recipient_x, size=10)
+            body = data.body_text or "Spazio riservato al contenuto della comunicazione."
+            body_y = height - 115 * mm
+            for paragraph in body.splitlines():
+                body_y = draw_wrapped_text(pdf, paragraph or " ", margin, body_y, width - 2 * margin, size=10, leading=15) - 5
+            footer_y = 18 * mm
+            pdf.setStrokeColor(primary); pdf.line(margin, footer_y + 10 * mm, width - margin, footer_y + 10 * mm)
+            pdf.setFillColor(colors.black); pdf.setFont("Helvetica", 7.5)
+            footer = " | ".join(part for part in [item.company_name, item.company_address, f"P.IVA/CF {item.tax_id}" if item.tax_id else None, item.phone, item.email, item.pec, item.website] if part)
+            draw_wrapped_text(pdf, footer, margin, footer_y + 5 * mm, width - 2 * margin, size=7.5, leading=9)
+        else:
+            sender_y = height - margin - 4 * mm
+            pdf.setFillColor(primary); pdf.setFont("Helvetica-Bold", 10); pdf.drawString(margin, sender_y, item.company_name)
+            draw_wrapped_text(pdf, item.company_address or "", margin, sender_y - 5 * mm, 90 * mm, size=7.5, leading=9)
+            recipient_x = max(margin, 115 * mm - item.recipient_offset_mm * mm)
+            recipient_y = 42 * mm
+            pdf.setFillColor(colors.black); pdf.setFont("Helvetica-Bold", 11); pdf.drawString(recipient_x, recipient_y, data.recipient_name)
+            draw_wrapped_text(pdf, data.recipient_address, recipient_x, recipient_y - 6 * mm, width - margin - recipient_x, size=9.5, leading=12)
+        pdf.showPage(); pdf.save(); buffer.seek(0)
+        filename = "carta-intestata-a4.pdf" if data.mode == "A4" else "busta-intestata-dl.pdf"
+        return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 
 TARIFF_PLAN_TYPES = {"VOCE", "DATI", "FISSO", "DATI_M2M"}

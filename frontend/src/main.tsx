@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"incentives"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
+type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"consumeractivations"|"incentives"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -68,6 +68,7 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="imports"} icon={<FileSpreadsheet/>} onClick={()=>setPage("imports")}>Importazioni Business</Nav>
         <Nav active={page==="windtrepanel"} icon={<Mail/>} onClick={()=>setPage("windtrepanel")}>WindTre Pannello</Nav>
         <div className="navgroup">COMMERCIALE</div>
+        <Nav active={page==="consumeractivations"} icon={<Smartphone/>} onClick={()=>setPage("consumeractivations")}>Attivazioni Consumer</Nav>
         <Nav active={page==="incentives"} icon={<CircleDollarSign/>} onClick={()=>setPage("incentives")}>Gare e commissioning</Nav>
         <Nav active={page==="tariffs"} icon={<Tag/>} onClick={()=>setPage("tariffs")}>Piani tariffari</Nav>
         <Nav active={page==="terminals"} icon={<Smartphone/>} onClick={()=>setPage("terminals")}>Terminali GA e CB</Nav>
@@ -91,6 +92,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
       {page==="windtrepanel"&&<WindTrePanel/>}
+      {page==="consumeractivations"&&<ConsumerActivationsDashboard/>}
       {page==="incentives"&&<IncentiveCompetitions/>}
       {page==="tariffs"&&<TariffPlans/>}
       {page==="terminals"&&<TerminalCatalog/>}
@@ -278,6 +280,58 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
   </div>
 }
 
+function ConsumerActivationsDashboard(){
+  const [data,setData]=useState<any>(null);
+  const [dateFrom,setDateFrom]=useState("");
+  const [dateTo,setDateTo]=useState("");
+  const [loading,setLoading]=useState(false);
+  async function load(){
+    setLoading(true);
+    const query=new URLSearchParams();
+    if(dateFrom)query.set("date_from",dateFrom);
+    if(dateTo)query.set("date_to",dateTo);
+    const response=await fetch(`${API}/consumer-activations/dashboard?${query}`);
+    setData(await response.json());setLoading(false);
+  }
+  useEffect(()=>{load()},[]);
+  const summary=data?.summary||{};
+  const maxDaily=Math.max(1,...(data?.daily||[]).map((item:any)=>item.events));
+  return <main className="page consumerActivationPage">
+    <div className="title"><div><small>MONITORAGGIO CONSUMER</small><h1>Dashboard attivazioni Consumer</h1><p>PDC, utenze, quote gara e commissioning in un’unica vista operativa.</p></div></div>
+    <section className="consumerFilters">
+      <label>Dal<input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/></label>
+      <label>Al<input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></label>
+      <button className="new" onClick={load} disabled={loading}>{loading?"Aggiornamento…":"Aggiorna dashboard"}</button>
+      {(dateFrom||dateTo)&&<button className="secondary" onClick={async()=>{setDateFrom("");setDateTo("");setLoading(true);setData(await fetch(`${API}/consumer-activations/dashboard`).then(r=>r.json()));setLoading(false)}}>Azzera periodo</button>}
+    </section>
+    <div className="consumerActivationKpis">
+      <article><span>PDC importate</span><strong>{summary.pdc_imported||0}</strong><small>{summary.customers||0} clienti</small></article>
+      <article><span>Eventi conteggiati</span><strong>{summary.events||0}</strong><small>{summary.valid_events||0} validi · {summary.to_verify||0} da verificare</small></article>
+      <article><span>Mobile / Fisso</span><strong>{summary.mobile||0} / {summary.fixed||0}</strong><small>nuove attivazioni</small></article>
+      <article><span>Device / Reload</span><strong>{summary.customer_base||0} / {summary.reload||0}</strong><small>operazioni commerciali</small></article>
+      <article><span>Canone mensile</span><strong>{formatCurrency(summary.monthly_revenue||0)}</strong><small>MRR importato</small></article>
+      <article className="highlight"><span>Commissioning stimato</span><strong>{formatCurrency(summary.commissioning||0)}</strong><small>soglie correnti</small></article>
+    </div>
+    <div className="consumerDashboardGrid">
+      <section className="modulecard">
+        <div className="sectiontitle"><div><BarChart3/><h2>Andamento attivazioni</h2></div></div>
+        {(data?.daily||[]).length?<div className="activationBars">{data.daily.map((item:any)=><div key={item.date}><span>{formatDate(item.date)}</span><div><i style={{width:`${Math.max(8,item.events/maxDaily*100)}%`}}></i></div><b>{item.events}</b><em>{formatCurrency(item.commission)}</em></div>)}</div>:<p className="muted">Nessuna attivazione nel periodo selezionato.</p>}
+      </section>
+      <section className="modulecard">
+        <div className="sectiontitle"><div><CheckCircle2/><h2>Stato lavorazione</h2></div></div>
+        <div className="consumerBreakdown">{(data?.statuses||[]).map((item:any)=><article key={item.status}><span>{item.status==="VALID"?"Valide":item.status==="TO_VERIFY"?"Da verificare":item.status}</span><strong>{item.events}</strong></article>)}</div>
+        <div className="sectiontitle smalltitle"><div><CircleDollarSign/><h2>Quote per pista</h2></div></div>
+        <div className="consumerBreakdown">{(data?.tracks||[]).map((item:any)=><article key={item.track}><span>{item.track}</span><strong>{item.events}</strong></article>)}</div>
+      </section>
+    </div>
+    <article className="tablecard consumerActivationTable">
+      <div className="sectiontitle"><div><History/><h2>Ultime attivazioni Consumer</h2></div><span>{data?.activations?.length||0} record</span></div>
+      <table><thead><tr><th>Data</th><th>Cliente</th><th>Codice cliente</th><th>Codice contratto</th><th>Utenza</th><th>Pista / Offerta</th><th>Stato</th><th>Commissione</th></tr></thead>
+      <tbody>{(data?.activations||[]).map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name}</b></td><td><code>{item.customer_code||"—"}</code></td><td><code>{item.contract_code||"—"}</code></td><td>{item.asset_number||"—"}</td><td><b>{item.track}</b><small>{item.offer||"—"}</small></td><td><span className={`activationStatus ${item.status.toLowerCase()}`}>{item.status==="VALID"?"Valida":"Da verificare"}</span></td><td><b className="money">{formatCurrency(item.commission||0)}</b></td></tr>)}</tbody></table>
+    </article>
+  </main>
+}
+
 function IncentiveCompetitions(){
   const [items,setItems]=useState<any[]>([]);
   const [selected,setSelected]=useState<any>(null);
@@ -290,7 +344,7 @@ function IncentiveCompetitions(){
   const [pdcHistory,setPdcHistory]=useState<any[]>([]);
   const [includeMobile,setIncludeMobile]=useState(false);
   const [pdcSeller,setPdcSeller]=useState("");
-  const emptyActivation={activation_date:"2026-03-01",track:"MOBILE",customer_id:"",seller_name:"",asset_number:"",offer:"",monthly_fee:0,direct_bonus:0,status:"VALID",attributes:{mnp:false,tied:false,piva:false,convergent:false,ftth:false,fwa:false,first_line:true,very_mobile:false,secure_option:false,phone_included:false,premium_tied_offer:false}};
+  const emptyActivation={activation_date:"2026-03-01",track:"MOBILE",customer_id:"",seller_name:"",asset_number:"",customer_code:"",contract_code:"",offer:"",monthly_fee:0,direct_bonus:0,status:"VALID",attributes:{mnp:false,tied:false,piva:false,convergent:false,ftth:false,fwa:false,first_line:true,very_mobile:false,secure_option:false,phone_included:false,premium_tied_offer:false}};
   const [activation,setActivation]=useState<any>(emptyActivation);
   const load=async()=>{
     const list=await fetch(API+"/incentives").then(r=>r.json());setItems(list);
@@ -388,7 +442,7 @@ function IncentiveCompetitions(){
       {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}
       {pdcHistory.length>0&&<section className="pdcHistory"><div className="sectiontitle"><div><History/><h2>PDC importate</h2></div><span>{pdcHistory.length} documenti</span></div>{pdcHistory.map(item=><article key={item.id}><FileText/><div><b>{item.customer_name}</b><small>{item.file_name} · {new Date(item.imported_at).toLocaleString("it-IT")}</small></div><span>{item.activation_ids.length} quote</span><a className="secondary" href={API.replace(/\/api\/v1$/,"")+item.report_url} target="_blank"><Printer/>Report attivazione</a></article>)}</section>}
     </>}
-    {showActivation&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setShowActivation(false)}}><form className="drawer activationForm" onSubmit={addActivation}><button type="button" className="close" onClick={()=>setShowActivation(false)}>×</button><small>CONTEGGIO GARA</small><h2>Nuova attivazione</h2><div className="fieldgrid"><label>Data attivazione<input type="date" required value={activation.activation_date} onChange={e=>setActivation({...activation,activation_date:e.target.value})}/></label><label>Pista<select value={activation.track} onChange={e=>setActivation({...activation,track:e.target.value})}>{tracks.map(([code,config]:any)=><option value={code} key={code}>{config.label}</option>)}</select></label><label>Numero / identificativo<input value={activation.asset_number} onChange={e=>setActivation({...activation,asset_number:e.target.value})}/></label><label>Offerta<input value={activation.offer} onChange={e=>setActivation({...activation,offer:e.target.value})}/></label><label>Canone mensile (€)<input type="number" step=".01" value={activation.monthly_fee} onChange={e=>setActivation({...activation,monthly_fee:Number(e.target.value)})}/></label><label>Gettone diretto (€)<input type="number" step=".01" value={activation.direct_bonus} onChange={e=>setActivation({...activation,direct_bonus:Number(e.target.value)})}/></label><label>Venditore<input value={activation.seller_name} onChange={e=>setActivation({...activation,seller_name:e.target.value})}/></label></div><h3>Caratteristiche che modificano punteggio e compenso</h3><div className="attributeChecks">{Object.entries({mnp:"MNP",tied:"Tied / Easy Pay",piva:"Partita IVA",convergent:"Convergente",ftth:"FTTH",fwa:"FWA",very_mobile:"Very Mobile",secure_option:"Più Sicuri",phone_included:"Telefono Incluso",premium_tied_offer:"Offerta Tied premium"}).map(([key,label])=><label key={key}><input type="checkbox" checked={!!activation.attributes[key]} onChange={e=>setActivation({...activation,attributes:{...activation.attributes,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="formactions"><button className="new" disabled={busy}>Salva e conteggia</button></div></form></div>}
+    {showActivation&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setShowActivation(false)}}><form className="drawer activationForm" onSubmit={addActivation}><button type="button" className="close" onClick={()=>setShowActivation(false)}>×</button><small>CONTEGGIO GARA</small><h2>Nuova attivazione</h2><div className="fieldgrid"><label>Data attivazione<input type="date" required value={activation.activation_date} onChange={e=>setActivation({...activation,activation_date:e.target.value})}/></label><label>Pista<select value={activation.track} onChange={e=>setActivation({...activation,track:e.target.value})}>{tracks.map(([code,config]:any)=><option value={code} key={code}>{config.label}</option>)}</select></label><label>Numero / identificativo<input value={activation.asset_number} onChange={e=>setActivation({...activation,asset_number:e.target.value})}/></label><label>Codice cliente<input value={activation.customer_code} onChange={e=>setActivation({...activation,customer_code:e.target.value})}/></label><label>Codice contratto<input value={activation.contract_code} onChange={e=>setActivation({...activation,contract_code:e.target.value})}/></label><label>Offerta<input value={activation.offer} onChange={e=>setActivation({...activation,offer:e.target.value})}/></label><label>Canone mensile (€)<input type="number" step=".01" value={activation.monthly_fee} onChange={e=>setActivation({...activation,monthly_fee:Number(e.target.value)})}/></label><label>Gettone diretto (€)<input type="number" step=".01" value={activation.direct_bonus} onChange={e=>setActivation({...activation,direct_bonus:Number(e.target.value)})}/></label><label>Venditore<input value={activation.seller_name} onChange={e=>setActivation({...activation,seller_name:e.target.value})}/></label></div><h3>Caratteristiche che modificano punteggio e compenso</h3><div className="attributeChecks">{Object.entries({mnp:"MNP",tied:"Tied / Easy Pay",piva:"Partita IVA",convergent:"Convergente",ftth:"FTTH",fwa:"FWA",very_mobile:"Very Mobile",secure_option:"Più Sicuri",phone_included:"Telefono Incluso",premium_tied_offer:"Offerta Tied premium"}).map(([key,label])=><label key={key}><input type="checkbox" checked={!!activation.attributes[key]} onChange={e=>setActivation({...activation,attributes:{...activation.attributes,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="formactions"><button className="new" disabled={busy}>Salva e conteggia</button></div></form></div>}
   </main>
 }
 

@@ -152,6 +152,8 @@ class IncentiveActivation(Base):
     track: Mapped[str] = mapped_column(String(40), index=True)
     offer: Mapped[str | None] = mapped_column(String(255))
     asset_number: Mapped[str | None] = mapped_column(String(120))
+    customer_code: Mapped[str | None] = mapped_column(String(120), index=True)
+    contract_code: Mapped[str | None] = mapped_column(String(120), index=True)
     monthly_fee_cents: Mapped[int] = mapped_column(Integer, default=0)
     direct_bonus_cents: Mapped[int] = mapped_column(Integer, default=0)
     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
@@ -713,6 +715,8 @@ class IncentiveActivationRequest(BaseModel):
     track: str
     offer: str | None = None
     asset_number: str | None = None
+    customer_code: str | None = None
+    contract_code: str | None = None
     monthly_fee: float = 0
     direct_bonus: float = 0
     attributes: dict[str, Any] = Field(default_factory=dict)
@@ -1501,6 +1505,8 @@ def serialize_incentive_activation(item: IncentiveActivation, customer_name: str
         "customer_name": customer_name or "", "activation_date": item.activation_date.isoformat(),
         "source_type": item.source_type, "source_key": item.source_key, "seller_name": item.seller_name or "",
         "track": item.track, "offer": item.offer or "", "asset_number": item.asset_number or "",
+        "customer_code": item.customer_code or (item.attributes or {}).get("customer_code", ""),
+        "contract_code": item.contract_code or (item.attributes or {}).get("contract_code", ""),
         "monthly_fee": item.monthly_fee_cents / 100, "direct_bonus": item.direct_bonus_cents / 100,
         "attributes": item.attributes or {}, "status": item.status, "notes": item.notes or "",
     }
@@ -3534,6 +3540,7 @@ def create_incentive_activation(competition_id: uuid.UUID, data: IncentiveActiva
             competition_id=competition_id, customer_id=data.customer_id, activation_date=data.activation_date,
             source_type="MANUAL", source_key=f"MANUAL:{uuid.uuid4()}", seller_name=clean(data.seller_name) or None,
             track=track, offer=clean(data.offer) or None, asset_number=clean(data.asset_number) or None,
+            customer_code=clean(data.customer_code) or None, contract_code=clean(data.contract_code) or None,
             monthly_fee_cents=round(data.monthly_fee * 100), direct_bonus_cents=round(data.direct_bonus * 100),
             attributes=data.attributes, status=normalize_header(data.status), notes=clean(data.notes) or None,
         )
@@ -3664,6 +3671,8 @@ async def import_incentive_pdc(
                 source_type="PDC", source_key=f"PDC:{digest}:{entry['track']}:{index}",
                 seller_name=clean(seller_name) or None, track=entry["track"], offer=entry["offer"],
                 asset_number=parsed["contract"]["phone"], monthly_fee_cents=round(entry.get("monthly_fee", 0) * 100),
+                customer_code=parsed["contract"]["customer_code"] or None,
+                contract_code=parsed["contract"]["contract_code"] or None,
                 direct_bonus_cents=round(entry.get("direct_bonus", 0) * 100), attributes={
                     **entry.get("attributes", {}), "contract_code": parsed["contract"]["contract_code"],
                     "iccid": parsed["contract"]["iccid"], "imei": parsed["device"]["imei"],
@@ -3839,6 +3848,91 @@ def sync_incentive_activations(competition_id: uuid.UUID):
             added += 1
         db.commit()
         return {"added": added, "skipped_without_activation_date": skipped, "source_import": latest_import.file_name}
+
+
+@app.get("/api/v1/consumer-activations/dashboard")
+def consumer_activations_dashboard(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+):
+    with SessionLocal() as db:
+        statement = (
+            select(IncentiveActivation, Customer)
+            .join(Customer, Customer.id == IncentiveActivation.customer_id)
+            .where(Customer.segment == "CONSUMER")
+        )
+        if date_from:
+            statement = statement.where(IncentiveActivation.activation_date >= date_from)
+        if date_to:
+            statement = statement.where(IncentiveActivation.activation_date <= date_to)
+        pairs = db.execute(
+            statement.order_by(IncentiveActivation.activation_date.desc(), IncentiveActivation.created_at.desc())
+        ).all()
+
+        commissions: dict[str, float] = {}
+        competition_ids = {activation.competition_id for activation, _ in pairs}
+        for competition_id in competition_ids:
+            competition = db.get(IncentiveCompetition, competition_id)
+            if competition:
+                for row in incentive_report(db, competition)["activations"]:
+                    commissions[row["id"]] = row["commission"]
+
+        rows = []
+        daily: dict[str, dict[str, Any]] = {}
+        track_counts: dict[str, int] = defaultdict(int)
+        status_counts: dict[str, int] = defaultdict(int)
+        customer_ids: set[uuid.UUID] = set()
+        for activation, customer in pairs:
+            serialized = serialize_incentive_activation(activation, customer.business_name)
+            commission = commissions.get(str(activation.id), 0)
+            serialized["commission"] = commission
+            rows.append(serialized)
+            customer_ids.add(customer.id)
+            track_counts[activation.track] += 1
+            status_counts[activation.status] += 1
+            day_key = activation.activation_date.isoformat()
+            day = daily.setdefault(day_key, {"date": day_key, "events": 0, "commission": 0.0})
+            day["events"] += 1
+            day["commission"] = round(day["commission"] + commission, 2)
+
+        pdc_statement = (
+            select(func.count(IncentivePdcImport.id))
+            .join(Customer, Customer.id == IncentivePdcImport.customer_id)
+            .where(Customer.segment == "CONSUMER")
+        )
+        if date_from:
+            pdc_statement = pdc_statement.where(
+                IncentivePdcImport.extracted_data["contract"]["activation_date"].astext >= date_from.isoformat()
+            )
+        if date_to:
+            pdc_statement = pdc_statement.where(
+                IncentivePdcImport.extracted_data["contract"]["activation_date"].astext <= date_to.isoformat()
+            )
+        pdc_count = db.scalar(pdc_statement) or 0
+
+        return {
+            "filters": {
+                "date_from": date_from.isoformat() if date_from else None,
+                "date_to": date_to.isoformat() if date_to else None,
+            },
+            "summary": {
+                "pdc_imported": pdc_count,
+                "customers": len(customer_ids),
+                "events": len(rows),
+                "valid_events": status_counts.get("VALID", 0),
+                "to_verify": status_counts.get("TO_VERIFY", 0),
+                "mobile": track_counts.get("MOBILE", 0),
+                "fixed": track_counts.get("FIXED", 0),
+                "customer_base": track_counts.get("CUSTOMER_BASE", 0),
+                "reload": track_counts.get("RELOAD", 0),
+                "monthly_revenue": round(sum(item.monthly_fee_cents for item, _ in pairs) / 100, 2),
+                "commissioning": round(sum(commissions.get(str(item.id), 0) for item, _ in pairs), 2),
+            },
+            "tracks": [{"track": key, "events": value} for key, value in sorted(track_counts.items())],
+            "statuses": [{"status": key, "events": value} for key, value in sorted(status_counts.items())],
+            "daily": [daily[key] for key in sorted(daily)],
+            "activations": rows[:100],
+        }
 
 
 @app.get("/api/v1/incentives/{competition_id}/report")

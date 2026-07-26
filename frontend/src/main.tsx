@@ -92,7 +92,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="customers"&&<Customers/>}
       {page==="imports"&&<Imports/>}
       {page==="windtrepanel"&&<WindTrePanel/>}
-      {page==="consumeractivations"&&<ConsumerActivationsDashboard/>}
+      {page==="consumeractivations"&&<ConsumerActivationsDashboard openPdcImport={()=>setPage("incentives")}/>}
       {page==="incentives"&&<IncentiveCompetitions/>}
       {page==="tariffs"&&<TariffPlans/>}
       {page==="terminals"&&<TerminalCatalog/>}
@@ -280,7 +280,7 @@ function CustomerDetail({item,close}:{item:any;close:()=>void}){
   </div>
 }
 
-function ConsumerActivationsDashboard(){
+function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
   const [data,setData]=useState<any>(null);
   const [dateFrom,setDateFrom]=useState("");
   const [dateTo,setDateTo]=useState("");
@@ -297,7 +297,7 @@ function ConsumerActivationsDashboard(){
   const summary=data?.summary||{};
   const maxDaily=Math.max(1,...(data?.daily||[]).map((item:any)=>item.events));
   return <main className="page consumerActivationPage">
-    <div className="title"><div><small>MONITORAGGIO CONSUMER</small><h1>Dashboard attivazioni Consumer</h1><p>PDC, utenze, quote gara e commissioning in un’unica vista operativa.</p></div></div>
+    <div className="title"><div><small>MONITORAGGIO CONSUMER</small><h1>Dashboard attivazioni Consumer</h1><p>PDC, utenze, quote gara e commissioning in un’unica vista operativa.</p></div><button className="new" onClick={openPdcImport}><UploadCloud/>Importa PDC</button></div>
     <section className="consumerFilters">
       <label>Dal<input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/></label>
       <label>Al<input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></label>
@@ -389,7 +389,7 @@ function IncentiveCompetitions(){
     const body=new FormData();body.append("file",file);
     const response=await fetch(`${API}/incentives/${selected.id}/pdc/preview`,{method:"POST",body});const result=await response.json();setBusy(false);
     if(!response.ok){setMessage(result.detail||"PDC non riconosciuta");return}
-    setPdcPreview(result);setIncludeMobile(!!result.classification?.new_mobile_activation);
+    setPdcPreview(result);setIncludeMobile(!!result.classification?.new_mobile_activation&&!result.proposed_entries?.some((item:any)=>item.track==="MOBILE"));
   }
   async function importPdc(){
     if(!pdcFile||!selected)return;setBusy(true);setMessage("");
@@ -433,10 +433,10 @@ function IncentiveCompetitions(){
       </div>}
       {pdcPreview&&<section className="pdcPreview">
         <div className="sectiontitle"><div><FileText/><h2>Anteprima PDC · {pdcPreview.file_name}</h2></div><button className="icon" onClick={()=>{setPdcPreview(null);setPdcFile(null)}}><XCircle/></button></div>
-        <div className="pdcSummary"><article><span>Cliente</span><b>{pdcPreview.customer.business_name}</b><small>{pdcPreview.customer.fiscal_code}</small></article><article><span>Contratto</span><b>{pdcPreview.contract.contract_code}</b><small>Codice cliente {pdcPreview.contract.customer_code}</small></article><article><span>Linea</span><b>{pdcPreview.contract.phone}</b><small>ICCID {pdcPreview.contract.iccid}</small></article><article><span>Data</span><b>{formatDate(pdcPreview.contract.activation_date)}</b><small>Dealer {pdcPreview.contract.dealer_code}</small></article><article><span>Terminale</span><b>{pdcPreview.device.model}</b><small>IMEI {pdcPreview.device.imei} · {formatCurrency(pdcPreview.device.price)}</small></article><article><span>Pagamento</span><b>{pdcPreview.contract.payment_method}</b><small>{pdcPreview.device.installments} rate da {formatCurrency(pdcPreview.device.installment_amount)}</small></article></div>
+        <div className="pdcSummary"><article><span>Cliente</span><b>{pdcPreview.customer.business_name}</b><small>{pdcPreview.customer.fiscal_code}</small></article><article><span>Contratto</span><b>{pdcPreview.contract.contract_code}</b><small>Codice cliente {pdcPreview.contract.customer_code}</small></article><article><span>Linea</span><b>{pdcPreview.contract.phone||"Nuova linea"}</b><small>{pdcPreview.contract.iccid?`ICCID ${pdcPreview.contract.iccid}`:pdcPreview.document_type==="WINDTRE_PDC_GA_FIXED"?"Numerazione da assegnare":"ICCID non rilevato"}</small></article><article><span>Data</span><b>{formatDate(pdcPreview.contract.activation_date)}</b><small>Dealer {pdcPreview.contract.dealer_code}</small></article><article><span>{pdcPreview.document_type==="WINDTRE_PDC_GA_FIXED"?"Offerta":"Terminale"}</span><b>{pdcPreview.document_type==="WINDTRE_PDC_GA_FIXED"?pdcPreview.contract.plan:(pdcPreview.device.model||"Nessun terminale rilevato")}</b><small>{pdcPreview.device.imei?`IMEI ${pdcPreview.device.imei} · ${formatCurrency(pdcPreview.device.price)}`:pdcPreview.contract.options}</small></article><article><span>Pagamento</span><b>{pdcPreview.contract.payment_method}</b><small>{pdcPreview.device.installments?`${pdcPreview.device.installments} rate da ${formatCurrency(pdcPreview.device.installment_amount)}`:pdcPreview.classification.reason}</small></article></div>
         <div className="pdcQuota"><h3>Quote gara proposte</h3>{pdcPreview.proposed_entries.map((entry:any,index:number)=><article key={index}><CircleDollarSign/><div><b>{entry.label}</b><small>{entry.track} · {entry.offer}</small></div><strong>{formatCurrency(entry.direct_bonus)}</strong></article>)}</div>
         {pdcPreview.warnings?.length>0&&<div className="pdcWarnings">{pdcPreview.warnings.map((warning:string)=><span key={warning}><AlertTriangle/>{warning}</span>)}</div>}
-        <div className="pdcConfirm"><label>Venditore<input value={pdcSeller} placeholder="Nome venditore" onChange={e=>setPdcSeller(e.target.value)}/></label><label className="mobileVerify"><input type="checkbox" checked={includeMobile} onChange={e=>setIncludeMobile(e.target.checked)}/><span><b>Conteggia anche come nuova attivazione Mobile</b><small>Attivare solo dopo verifica: questa PDC espone Wind Basic e non un canone mobile remunerabile.</small></span></label><button className="new" disabled={busy||pdcPreview.duplicate} onClick={importPdc}>{busy?"Importazione…":pdcPreview.duplicate?"PDC già importata":"Conferma importazione"}</button></div>
+        <div className="pdcConfirm"><label>Venditore<input value={pdcSeller} placeholder="Nome venditore" onChange={e=>setPdcSeller(e.target.value)}/></label>{!pdcPreview.proposed_entries?.some((item:any)=>item.track==="MOBILE")&&pdcPreview.document_type!=="WINDTRE_PDC_GA_FIXED"&&<label className="mobileVerify"><input type="checkbox" checked={includeMobile} onChange={e=>setIncludeMobile(e.target.checked)}/><span><b>Conteggia anche come nuova attivazione Mobile</b><small>Attivare solo dopo verifica quando la PDC non espone un’offerta mobile remunerabile.</small></span></label>}<button className="new" disabled={busy||pdcPreview.duplicate} onClick={importPdc}>{busy?"Importazione…":pdcPreview.duplicate?"PDC già importata":"Conferma importazione"}</button></div>
       </section>}
       {message&&<div className="notice ok"><CheckCircle2/>{message}</div>}
       {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}

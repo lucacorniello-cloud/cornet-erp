@@ -1397,34 +1397,54 @@ def pdc_reload_base_bonus(device_price: float) -> float:
 def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     text = pdf_document_text(contents)
     upper = text.upper()
-    if "PROPOSTA DI CONTRATTO WINDTRE" not in upper:
+    if "PROPOSTA DI CONTRATTO WINDTRE" not in upper and "PROPOSTA DI CONTRATTO" not in upper:
         raise HTTPException(422, "Il documento non è stato riconosciuto come PDC WINDTRE")
+    is_fixed_ga = "LINEA TELEFONICA SU CUI ATTIVARE IL SERVIZIO" in upper
+    is_mobile_ga = "DATI DELLA SIM WINDTRE" in upper and any(
+        marker in upper for marker in ("GO UNLIMITED", "SUPER UNLIMITED", "MIA UNLIMITED", "START 5G")
+    )
     first_name = regex_value(text, r"Cognome:\s*[A-ZÀ-Ý' ]+\s+Nome:\s*([A-ZÀ-Ý' ]+?)\s+Sesso:")
     last_name = regex_value(text, r"Cognome:\s*([A-ZÀ-Ý' ]+?)\s+Nome:")
     fiscal_code = regex_value(text, r"Codice Fiscale:\s*([A-Z0-9]{16})")
     birth_date_text = regex_value(text, r"Data di nascita:\s*(\d{2}/\d{2}/\d{4})")
     activation_date_text = regex_value(text, r"(?:^|\n)Data:\s*(\d{2}/\d{2}/\d{4})")
-    phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(text, r"(?:N\.\s*Telefono|Numero di telefono):\s*(\+?\d{9,15})")))
+    phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(
+        text, r"(?:N\.\s*Telefono|Numero di telefono):\s*(\+?\d{9,15})"
+    )))
+    if is_fixed_ga:
+        phone = re.sub(r"\D", "", regex_value(text, r"Sul Numero di Telefono:\s*(\d{8,15})"))
+    contact_phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(
+        text, r"(?:Intestatario Contratto[\s\S]{0,100}?Numero di telefono|Recapito):\s*(\+?\d{9,15})"
+    )))
     iccid = regex_value(text, r"(?:Seriale SIM \(ICCID\)|Numero della SIM):\s*(\d{19,20})")
-    customer_code = regex_value(text, r"Codice Cliente:\s*([A-Z0-9.]+)")
-    contract_code = regex_value(text, r"Codice Contratto:\s*([A-Z0-9.]+)")
-    dealer_code = regex_value(text, r"(?:Codice Rivenditore|Codice Dealer):\s*([A-Z0-9.]+)")
+    customer_code = regex_value(text, r"Codice Cliente\s*:?\s*([A-Z0-9.]+)")
+    contract_code = regex_value(text, r"(?:Codice Contratto|Numero Contratto)\s*:?\s*([A-Z0-9.]+)")
+    dealer_code = regex_value(text, r"(?:Codice Rivenditore|Codice Dealer)\s*:?\s*([A-Z0-9.]+)")
     plan = regex_value(text, r"Piano Telefonico:\s*(.+?)\s*(?:\n|Opzioni/servizi:)")
-    options = regex_value(text, r"Opzioni/servizi:\s*(.+?)\s*\n")
+    options = regex_value(text, r"Opzioni/servizi:\s*([\s\S]+?)(?:Costo attivazione|Data:)")
+    fixed_offer = regex_value(text, r"Offerta\s*\(\*\)\s*\n\s*([^\n]+)")
+    fixed_options = regex_value(text, r"Opzioni aggiuntive\s*\n([\s\S]+?)\(\*\)")
+    mobile_offer = regex_value(options, r"^\s*([^:\n]+?)\s*:")
+    mobile_monthly_fee = parse_monthly_fee(regex_value(
+        options, r"^[^:\n]+?:\s*Costo mensile:\s*([\d.,]+)\s*euro"
+    ))
     imei = regex_value(text, r"Numero IMEI:\s*(\d{15})")
     device_model = regex_value(text, r"Modello:\s*(.+?)\s*(?:\n|Data di acquisto:)")
     device_price = parse_monthly_fee(regex_value(text, r"Prezzo device:\s*([\d.,]+)\s*euro"))
     upfront = parse_monthly_fee(regex_value(text, r"Anticipo:\s*([\d.,]+)\s*euro"))
     installments = int(regex_value(text, r"Durata Rateizzazione:\s*(\d+)") or 0)
     installment_amount = parse_monthly_fee(regex_value(text, r"\d+\s*rate da\s*([\d.,]+)\s*euro"))
-    reload_active = "DATI DEL SERVIZIO  SMARTPHONE RELOAD" in upper or "DATI DEL SERVIZIO SMARTPHONE RELOAD" in upper
+    reload_active = any(marker in upper for marker in (
+        "DATI DEL SERVIZIO  SMARTPHONE RELOAD", "DATI DEL SERVIZIO SMARTPHONE RELOAD",
+        "DATI DEL SERVIZIO  RELOAD FOREVER", "DATI DEL SERVIZIO RELOAD FOREVER",
+    ))
     reload_cost = parse_monthly_fee(regex_value(text, r"Costo servizio:\s*([\d.,]+)\s*€"))
     payment_method = "SDD" if "ADDEBITO DIRETTO SU C/C" in upper else "ALTRO"
     address = regex_value(text, r"Residenza:\s*(.+?)\s+Provincia:")
     postal_code = regex_value(text, r"CAP:\s*(\d{5})")
     city = regex_value(text, r"Comune:\s*([A-ZÀ-Ý' ]+?)\s+Nazione:")
     email = regex_value(text, r"Email:\s*([^\s]+@[^\s]+)")
-    document_type = regex_value(text, r"Documento d'Identità:\s*([^;]+);")
+    identity_document_type = regex_value(text, r"Documento d'Identità:\s*([^;]+);")
     document_number = regex_value(text, r"Numero:\s*([A-Z0-9]+)\s+Data Rilascio:")
     issue_date_text = regex_value(text, r"Data Rilascio:\s*(\d{2}/\d{2}/\d{4})")
     activation_date = parsed_date(activation_date_text)
@@ -1434,7 +1454,32 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     )
     is_piva = bool(company_tax_id)
     proposed_entries = []
-    if imei:
+    if is_fixed_ga:
+        proposed_entries.append({
+            "track": "FIXED", "label": "Nuova attivazione Fisso GA",
+            "offer": fixed_offer or "Linea fissa WINDTRE", "direct_bonus": 0,
+            "monthly_fee": 0, "points": 1,
+            "attributes": {
+                "new_line": "SU UNA NUOVA LINEA TELEFONICA" in upper,
+                "first_line": True, "piva": is_piva,
+                "convergent": "GIGA ILLIMITATI" in fixed_options.upper(),
+                "ftth": False, "fwa": False, "technology_to_verify": True,
+            },
+        })
+    elif is_mobile_ga:
+        proposed_entries.append({
+            "track": "MOBILE", "label": "Nuova attivazione Mobile GA",
+            "offer": mobile_offer or plan, "direct_bonus": 0,
+            "monthly_fee": mobile_monthly_fee, "points": 1,
+            "attributes": {
+                "mnp": "PORTABILIT" in upper or "OPERATORE DI PROVENIENZA" in upper,
+                "tied": "EASY PAY" in options.upper(), "piva": is_piva,
+                "secure_option": "PIU' SICURI" in options.upper() or "PIÙ SICURI" in options.upper(),
+                "convergent": "CONVERGENZA" in options.upper() or "GIGA ILLIMITATI" in options.upper(),
+                "phone_included": False, "device_sale": False,
+            },
+        })
+    elif imei:
         proposed_entries.append({
             "track": "CUSTOMER_BASE", "label": "Telefono Incluso - vendita a rate",
             "offer": f"Telefono Incluso · {device_model}", "direct_bonus": 8.0,
@@ -1443,10 +1488,12 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
         })
     if reload_active:
         proposed_entries.append({
-            "track": "RELOAD", "label": "Smartphone Reload",
-            "offer": f"Smartphone Reload · {device_model}", "direct_bonus": pdc_reload_base_bonus(device_price),
+            "track": "RELOAD", "label": "Reload Forever" if "RELOAD FOREVER" in upper else "Smartphone Reload",
+            "offer": f"{'Reload Forever' if 'RELOAD FOREVER' in upper else 'Smartphone Reload'} · {device_model}".rstrip(" ·"),
+            "direct_bonus": pdc_reload_base_bonus(device_price) if device_price else 0,
             "monthly_fee": 0, "points": 1,
             "attributes": {"reload_service": True, "device_sale": False, "device_price": device_price, "reload_cost": reload_cost},
+            "status": "VALID" if device_price else "TO_VERIFY",
         })
     warnings = []
     if not activation_date:
@@ -1455,34 +1502,51 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
         warnings.append("Codice fiscale non rilevato")
     if not customer_code:
         warnings.append("Codice cliente non rilevato")
-    if not plan or plan.upper() in {"WIND BASIC", "NEW BASIC"}:
+    if reload_active and not device_price:
+        warnings.append("Reload rilevato, ma il prezzo di listino del terminale non è presente: quota Reload da verificare")
+    if is_fixed_ga and not fixed_offer:
+        warnings.append("Offerta fissa non rilevata")
+    if is_fixed_ga:
+        warnings.append("Tecnologia FTTH/FTTC e canone non sono esposti nella PDC: completare dopo l'esito tecnico")
+    if not is_fixed_ga and not is_mobile_ga and (not plan or plan.upper() in {"WIND BASIC", "NEW BASIC"}):
         warnings.append("La PDC non espone un'offerta mobile ricorrente remunerabile: non viene creata automaticamente una nuova attivazione Mobile")
+    if is_fixed_ga:
+        document_type = "WINDTRE_PDC_GA_FIXED"
+        classification = {"new_mobile_activation": False, "reason": "Nuova attivazione Fisso GA"}
+    elif is_mobile_ga:
+        document_type = "WINDTRE_PDC_GA_MOBILE"
+        classification = {"new_mobile_activation": True, "reason": "Nuova attivazione Mobile GA"}
+    else:
+        document_type = "WINDTRE_PDC_DEVICE_RELOAD" if reload_active else "WINDTRE_PDC"
+        classification = {
+            "new_mobile_activation": False,
+            "reason": "PDC con vendita a rate/Reload su linea esistente; classificata Customer Base salvo verifica operatore",
+        }
     return {
-        "document_type": "WINDTRE_PDC_DEVICE_RELOAD" if reload_active else "WINDTRE_PDC",
+        "document_type": document_type,
         "file_name": file_name,
         "customer": {
             "first_name": first_name.title(), "last_name": last_name.title(),
             "business_name": f"{first_name.title()} {last_name.title()}".strip(),
             "fiscal_code": fiscal_code, "segment": "CONSUMER", "birth_date": birth_date_text,
             "address": address.title(), "postal_code": postal_code, "city": city.title(),
-            "email": email, "document_type": document_type, "document_number": document_number,
+            "email": email, "contact_phone": contact_phone,
+            "document_type": identity_document_type, "document_number": document_number,
             "document_issue_date": issue_date_text,
         },
         "contract": {
             "operator": "WINDTRE", "market": "CONSUMER", "customer_code": customer_code,
             "contract_code": contract_code, "activation_date": activation_date.isoformat() if activation_date else None,
-            "dealer_code": dealer_code, "phone": phone, "iccid": iccid, "plan": plan,
-            "options": options, "payment_method": payment_method,
+            "dealer_code": dealer_code, "phone": phone, "iccid": iccid,
+            "plan": fixed_offer if is_fixed_ga else (mobile_offer or plan),
+            "options": fixed_options if is_fixed_ga else options, "payment_method": payment_method,
         },
         "device": {
             "imei": imei, "model": device_model, "price": device_price, "upfront": upfront,
             "installments": installments, "installment_amount": installment_amount,
             "reload_active": reload_active, "reload_cost": reload_cost,
         },
-        "classification": {
-            "new_mobile_activation": False,
-            "reason": "PDC con vendita a rate/Reload su linea esistente; classificata Customer Base salvo verifica operatore",
-        },
+        "classification": classification,
         "proposed_entries": proposed_entries,
         "warnings": warnings,
     }
@@ -3615,7 +3679,8 @@ async def import_incentive_pdc(
             customer = Customer(
                 segment="CONSUMER", business_name=customer_data["business_name"],
                 first_name=customer_data["first_name"] or None, last_name=customer_data["last_name"] or None,
-                fiscal_code=customer_data["fiscal_code"] or None, phone=parsed["contract"]["phone"] or None,
+                fiscal_code=customer_data["fiscal_code"] or None,
+                phone=customer_data.get("contact_phone") or parsed["contract"]["phone"] or None,
                 email=customer_data["email"] or None, address=customer_data["address"] or None,
                 postal_code=customer_data["postal_code"] or None, city=customer_data["city"] or None,
                 birth_date=parsed_date(customer_data["birth_date"]), document_type=customer_data["document_type"] or None,
@@ -3628,7 +3693,7 @@ async def import_incentive_pdc(
         else:
             for field, value in (
                 ("first_name", customer_data["first_name"]), ("last_name", customer_data["last_name"]),
-                ("phone", parsed["contract"]["phone"]), ("email", customer_data["email"]),
+                ("phone", customer_data.get("contact_phone") or parsed["contract"]["phone"]), ("email", customer_data["email"]),
                 ("address", customer_data["address"]), ("postal_code", customer_data["postal_code"]),
                 ("city", customer_data["city"]), ("document_type", customer_data["document_type"]),
                 ("document_number", customer_data["document_number"]),
@@ -3654,7 +3719,7 @@ async def import_incentive_pdc(
         stored_path.write_bytes(contents)
         activation_ids = []
         entries = list(parsed["proposed_entries"])
-        if include_mobile:
+        if include_mobile and not any(entry.get("track") == "MOBILE" for entry in entries):
             entries.insert(0, {
                 "track": "MOBILE", "label": "Nuova attivazione Mobile da PDC",
                 "offer": parsed["contract"]["plan"], "direct_bonus": 5.0 if parsed["device"]["imei"] else 0,
@@ -3670,7 +3735,8 @@ async def import_incentive_pdc(
                 competition_id=competition_id, customer_id=customer.id, activation_date=activation_date,
                 source_type="PDC", source_key=f"PDC:{digest}:{entry['track']}:{index}",
                 seller_name=clean(seller_name) or None, track=entry["track"], offer=entry["offer"],
-                asset_number=parsed["contract"]["phone"], monthly_fee_cents=round(entry.get("monthly_fee", 0) * 100),
+                asset_number=parsed["contract"]["phone"] or ("NUOVA LINEA" if entry["track"] == "FIXED" else None),
+                monthly_fee_cents=round(entry.get("monthly_fee", 0) * 100),
                 customer_code=parsed["contract"]["customer_code"] or None,
                 contract_code=parsed["contract"]["contract_code"] or None,
                 direct_bonus_cents=round(entry.get("direct_bonus", 0) * 100), attributes={

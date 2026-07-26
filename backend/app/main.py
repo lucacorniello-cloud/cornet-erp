@@ -1405,19 +1405,28 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     )
     first_name = regex_value(text, r"Cognome:\s*[A-ZÀ-Ý' ]+\s+Nome:\s*([A-ZÀ-Ý' ]+?)\s+Sesso:")
     last_name = regex_value(text, r"Cognome:\s*([A-ZÀ-Ý' ]+?)\s+Nome:")
+    if is_fixed_ga:
+        first_name = regex_value(text, r"(?:^|\n)Nome:\s*([^\n]+)")
+        last_name = regex_value(text, r"(?:^|\n)Cognome:\s*([^\n]+)")
     fiscal_code = regex_value(text, r"Codice Fiscale:\s*([A-Z0-9]{16})")
     birth_date_text = regex_value(text, r"Data di nascita:\s*(\d{2}/\d{2}/\d{4})")
     activation_date_text = regex_value(text, r"(?:^|\n)Data:\s*(\d{2}/\d{2}/\d{4})")
     phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(
         text, r"(?:N\.\s*Telefono|Numero di telefono):\s*(\+?\d{9,15})"
     )))
+    if is_mobile_ga:
+        phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(
+            text, r"Numero di telefono:\s*(\+?\d{9,15})\s+Seriale SIM"
+        )))
     if is_fixed_ga:
         phone = re.sub(r"\D", "", regex_value(text, r"Sul Numero di Telefono:\s*(\d{8,15})"))
     contact_phone = re.sub(r"^39", "", re.sub(r"\D", "", regex_value(
         text, r"(?:Intestatario Contratto[\s\S]{0,100}?Numero di telefono|Recapito):\s*(\+?\d{9,15})"
     )))
     iccid = regex_value(text, r"(?:Seriale SIM \(ICCID\)|Numero della SIM):\s*(\d{19,20})")
-    customer_code = regex_value(text, r"Codice Cliente\s*:?\s*([A-Z0-9.]+)")
+    customer_code = regex_value(
+        text, r"Codice Cliente\s*:?\s*(?:PROPOSTA DI CONTRATTO\s*)?(\d{6,})"
+    )
     contract_code = regex_value(text, r"(?:Codice Contratto|Numero Contratto)\s*:?\s*([A-Z0-9.]+)")
     dealer_code = regex_value(text, r"(?:Codice Rivenditore|Codice Dealer)\s*:?\s*([A-Z0-9.]+)")
     plan = regex_value(text, r"Piano Telefonico:\s*(.+?)\s*(?:\n|Opzioni/servizi:)")
@@ -1441,10 +1450,17 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     reload_cost = parse_monthly_fee(regex_value(text, r"Costo servizio:\s*([\d.,]+)\s*€"))
     payment_method = "SDD" if "ADDEBITO DIRETTO SU C/C" in upper else "ALTRO"
     address = regex_value(text, r"Residenza:\s*(.+?)\s+Provincia:")
+    if is_fixed_ga:
+        street_type = regex_value(text, r"Via, Piazza, etc:\s*([^\n]+?)\s+(?:Recapito:|N\.:|Prov\.:)")
+        street_name = regex_value(text, r"Indirizzo:\s*([^\n]+?)\s+(?:Città|Cap:)")
+        street_number = regex_value(text, r"N\.:\s*(\d+)")
+        address = " ".join(value for value in (street_type, street_name, street_number) if value)
     postal_code = regex_value(text, r"CAP:\s*(\d{5})")
     city = regex_value(text, r"Comune:\s*([A-ZÀ-Ý' ]+?)\s+Nazione:")
+    if is_fixed_ga:
+        city = regex_value(text, r"Città, Località:\s*([A-ZÀ-Ý' ]+?)\s+Cap:")
     email = regex_value(text, r"Email:\s*([^\s]+@[^\s]+)")
-    identity_document_type = regex_value(text, r"Documento d'Identità:\s*([^;]+);")
+    identity_document_type = regex_value(text, r"Documento d'Identit(?:à|a'):\s*([^;\n]+)")
     document_number = regex_value(text, r"Numero:\s*([A-Z0-9]+)\s+Data Rilascio:")
     issue_date_text = regex_value(text, r"Data Rilascio:\s*(\d{2}/\d{2}/\d{4})")
     activation_date = parsed_date(activation_date_text)
@@ -1472,7 +1488,7 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
             "offer": mobile_offer or plan, "direct_bonus": 0,
             "monthly_fee": mobile_monthly_fee, "points": 1,
             "attributes": {
-                "mnp": "PORTABILIT" in upper or "OPERATORE DI PROVENIENZA" in upper,
+                "mnp": bool(regex_value(text, r"Operatore di provenienza:\s*([^\n]+)")),
                 "tied": "EASY PAY" in options.upper(), "piva": is_piva,
                 "secure_option": "PIU' SICURI" in options.upper() or "PIÙ SICURI" in options.upper(),
                 "convergent": "CONVERGENZA" in options.upper() or "GIGA ILLIMITATI" in options.upper(),

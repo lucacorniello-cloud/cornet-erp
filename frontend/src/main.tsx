@@ -12,7 +12,7 @@ const API=import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 const ORDER_STATUSES=["INVIATO","IN_ATTESA","IN_LAVORAZIONE","RICEVUTO","EVASO"];
 const SIM_STATUSES=["IN_MAGAZZINO","ASSEGNATA","ATTIVATA","DISABILITATA","SOSPESA"];
 
-type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"consumeractivations"|"incentives"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
+type Page="dashboard"|"customers"|"imports"|"windtrepanel"|"consumeractivations"|"postactivationconfig"|"incentives"|"tariffs"|"terminals"|"terminalinventory"|"products"|"orders"|"inventory"|"simreport"|"ddt"|"letterhead"|"settings";
 type ImportSummary={
   id:string; competence_month:string; file_name:string; status:string; row_count:number;
   customer_count:number; new_customers:number; missing_customers:number; new_assets:number;
@@ -69,6 +69,7 @@ function Workspace({logout}:{logout:()=>void}){
         <Nav active={page==="windtrepanel"} icon={<Mail/>} onClick={()=>setPage("windtrepanel")}>WindTre Pannello</Nav>
         <div className="navgroup">COMMERCIALE</div>
         <Nav active={page==="consumeractivations"} icon={<Smartphone/>} onClick={()=>setPage("consumeractivations")}>Attivazioni Consumer</Nav>
+        <Nav active={page==="postactivationconfig"} icon={<FileClock/>} onClick={()=>setPage("postactivationconfig")}>Post-attivazione</Nav>
         <Nav active={page==="incentives"} icon={<CircleDollarSign/>} onClick={()=>setPage("incentives")}>Gare e commissioning</Nav>
         <Nav active={page==="tariffs"} icon={<Tag/>} onClick={()=>setPage("tariffs")}>Piani tariffari</Nav>
         <Nav active={page==="terminals"} icon={<Smartphone/>} onClick={()=>setPage("terminals")}>Terminali GA e CB</Nav>
@@ -93,6 +94,7 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="imports"&&<Imports/>}
       {page==="windtrepanel"&&<WindTrePanel/>}
       {page==="consumeractivations"&&<ConsumerActivationsDashboard openPdcImport={()=>setPage("incentives")}/>}
+      {page==="postactivationconfig"&&<PostActivationConfiguration/>}
       {page==="incentives"&&<IncentiveCompetitions/>}
       {page==="tariffs"&&<TariffPlans/>}
       {page==="terminals"&&<TerminalCatalog/>}
@@ -352,7 +354,7 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
       <p>Seleziona “Da disattivare” sulle offerte o opzioni interessate. La scadenza viene impostata automaticamente al primo giorno lavorativo del mese successivo.</p>
       <div className="postActivationList">{(data?.post_activation_tasks||[]).map((item:any)=><article className={`postActivationItem ${item.alert_state.toLowerCase()}`} key={item.id}>
         <div><div className="operatorLine"><OperatorLogo operator="WINDTRE" compact/><b>{item.item_name}</b></div><small>{item.item_type==="OFFER"?"Offerta":"Opzione aggiuntiva"} · {item.customer_name}</small><small>Contratto {item.contract_code} · attivazione {formatDate(item.activation_date)}</small></div>
-        <label className="deactivationFlag"><input type="checkbox" checked={item.action_required} disabled={item.status==="DONE"} onChange={e=>updatePostActivationTask(item.id,{action_required:e.target.checked})}/><span>Da disattivare</span></label>
+        <label className={`deactivationFlag ${!item.can_deactivate?"disabled":""}`} title={!item.can_deactivate?"Abilita la disattivazione nella pagina Post-attivazione":""}><input type="checkbox" checked={item.action_required} disabled={item.status==="DONE"||!item.can_deactivate} onChange={e=>updatePostActivationTask(item.id,{action_required:e.target.checked})}/><span>{item.can_deactivate?"Da disattivare":"Non configurata"}</span></label>
         <div className="postActivationDue"><span>{item.status==="DONE"?"Disattivata il":item.action_required?"Da gestire dal":"Da valutare"}</span><b>{item.status==="DONE"?formatDate(item.completed_date):item.due_date?formatDate(item.due_date):"—"}</b></div>
         {item.action_required&&item.status!=="DONE"?<button className="new" onClick={()=>updatePostActivationTask(item.id,{mark_completed:true})}><CheckCircle2/>Segna gestita</button>:<span className={`postActivationBadge ${item.alert_state.toLowerCase()}`}>{item.status==="DONE"?"Gestita":item.action_required?"Programmato":"Verifica"}</span>}
       </article>)}</div>
@@ -362,6 +364,73 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
       <table><thead><tr><th>Operatore</th><th>Data</th><th>Cliente</th><th>Codice cliente</th><th>Codice contratto</th><th>Utenza</th><th>Pista / Offerta</th><th>Stato</th><th>Commissione</th></tr></thead>
       <tbody>{(data?.activations||[]).map((item:any)=><tr key={item.id}><td><OperatorLogo operator={item.operator||"WINDTRE"} compact/></td><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name}</b></td><td><code>{item.customer_code||"—"}</code></td><td><code>{item.contract_code||"—"}</code></td><td>{item.asset_number||"—"}</td><td><b>{item.track}</b><small>{item.offer||"—"}</small></td><td><span className={`activationStatus ${item.status.toLowerCase()}`}>{item.status==="VALID"?"Valida":"Da verificare"}</span></td><td><b className="money">{formatCurrency(item.commission||0)}</b></td></tr>)}</tbody></table>
     </article>
+  </main>
+}
+
+function PostActivationConfiguration(){
+  const empty={operator:"WINDTRE",item_type:"OPTION",item_name:"",can_deactivate:true,default_action_required:false,is_active:true,notes:""};
+  const [items,setItems]=useState<any[]>([]);
+  const [form,setForm]=useState<any>(empty);
+  const [operator,setOperator]=useState("");
+  const [itemType,setItemType]=useState("");
+  const [message,setMessage]=useState("");
+  const [loading,setLoading]=useState(true);
+  const load=async()=>{
+    setLoading(true);
+    const query=new URLSearchParams();
+    if(operator)query.set("operator",operator);
+    if(itemType)query.set("item_type",itemType);
+    const response=await fetch(`${API}/post-activation-rules?${query}`);
+    setItems(response.ok?await response.json():[]);
+    setLoading(false);
+  };
+  useEffect(()=>{load()},[operator,itemType]);
+  async function createRule(event:React.FormEvent){
+    event.preventDefault();setMessage("");
+    const response=await fetch(API+"/post-activation-rules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(form)});
+    const result=await response.json();
+    if(!response.ok){setMessage(result.detail||"Configurazione non salvata");return}
+    setForm(empty);setMessage("Elemento aggiunto alla configurazione post-attivazione.");load();
+  }
+  async function updateRule(id:string,payload:any){
+    setMessage("");
+    const response=await fetch(`${API}/post-activation-rules/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const result=await response.json();
+    if(!response.ok){setMessage(result.detail||"Aggiornamento non riuscito");return}
+    setItems(current=>current.map(item=>item.id===id?result:item));
+  }
+  const configured=items.filter(item=>item.can_deactivate&&item.is_active).length;
+  const automatic=items.filter(item=>item.default_action_required&&item.is_active).length;
+  return <main className="page postActivationConfigPage">
+    <div className="title"><div><small>CONFIGURAZIONE COMMERCIALE</small><h1>Gestione post-attivazione</h1><p>Definisci quali offerte, servizi e opzioni possono richiedere una disattivazione dopo la vendita.</p></div><OperatorLogo operator={operator||"MULTIOPERATORE"}/></div>
+    <div className="postConfigKpis">
+      <article><span>Elementi rilevati</span><strong>{items.length}</strong><small>Dalle PDC e dalla configurazione manuale</small></article>
+      <article><span>Disattivabili</span><strong>{configured}</strong><small>Flag disponibile in dashboard</small></article>
+      <article><span>Preselezionati</span><strong>{automatic}</strong><small>Scadenza creata automaticamente</small></article>
+    </div>
+    <section className="postConfigToolbar">
+      <label>Operatore<select value={operator} onChange={e=>setOperator(e.target.value)}><option value="">Tutti</option><option>WINDTRE</option><option>VERY MOBILE</option><option>VODAFONE</option><option>TIM</option><option>FASTWEB</option><option>ILIAD</option></select></label>
+      <label>Tipologia<select value={itemType} onChange={e=>setItemType(e.target.value)}><option value="">Tutte</option><option value="OFFER">Offerta</option><option value="SERVICE">Servizio</option><option value="OPTION">Opzione</option></select></label>
+    </section>
+    <section className="postConfigLayout">
+      <article className="tablecard postConfigTable">
+        <div className="sectiontitle"><div><FileClock/><h2>Regole configurate</h2></div><span>{loading?"Caricamento…":`${items.length} elementi`}</span></div>
+        <table><thead><tr><th>Operatore</th><th>Elemento</th><th>Tipologia</th><th>Può essere disattivato</th><th>Da disattivare predefinito</th><th>Attivo</th></tr></thead>
+        <tbody>{items.map(item=><tr key={item.id}><td><OperatorLogo operator={item.operator} compact/></td><td><b>{item.item_name}</b>{item.notes&&<small>{item.notes}</small>}</td><td><span className={`postType ${item.item_type.toLowerCase()}`}>{item.item_type==="OFFER"?"Offerta":item.item_type==="SERVICE"?"Servizio":"Opzione"}</span></td><td><label className="switchField"><input type="checkbox" checked={item.can_deactivate} onChange={e=>updateRule(item.id,{can_deactivate:e.target.checked})}/><span></span></label></td><td><label className="switchField"><input type="checkbox" checked={item.default_action_required} disabled={!item.can_deactivate} onChange={e=>updateRule(item.id,{default_action_required:e.target.checked})}/><span></span></label></td><td><label className="switchField"><input type="checkbox" checked={item.is_active} onChange={e=>updateRule(item.id,{is_active:e.target.checked})}/><span></span></label></td></tr>)}</tbody></table>
+        {!loading&&!items.length&&<Empty icon={<FileClock/>} text="Nessun elemento trovato. Apri la Dashboard Consumer per acquisire quelli presenti nelle PDC oppure aggiungine uno manualmente."/>}
+      </article>
+      <form className="postConfigForm" onSubmit={createRule}>
+        <small>NUOVA REGOLA</small><h2>Aggiungi elemento</h2>
+        <label>Operatore<input required value={form.operator} onChange={e=>setForm({...form,operator:e.target.value.toUpperCase()})}/></label>
+        <label>Tipologia<select value={form.item_type} onChange={e=>setForm({...form,item_type:e.target.value})}><option value="OFFER">Offerta</option><option value="SERVICE">Servizio</option><option value="OPTION">Opzione</option></select></label>
+        <label>Nome offerta, servizio o opzione<input required value={form.item_name} onChange={e=>setForm({...form,item_name:e.target.value})}/></label>
+        <label>Note<textarea rows={3} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></label>
+        <label className="checkLine"><input type="checkbox" checked={form.can_deactivate} onChange={e=>setForm({...form,can_deactivate:e.target.checked,default_action_required:e.target.checked?form.default_action_required:false})}/>Può prevedere disattivazione post-vendita</label>
+        <label className="checkLine"><input type="checkbox" disabled={!form.can_deactivate} checked={form.default_action_required} onChange={e=>setForm({...form,default_action_required:e.target.checked})}/>Seleziona automaticamente “Da disattivare”</label>
+        <button className="new">Salva configurazione</button>
+        {message&&<div className="notice">{message}</div>}
+      </form>
+    </section>
   </main>
 }
 

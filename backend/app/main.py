@@ -4108,10 +4108,12 @@ def consumer_activations_dashboard(
         ).all()
 
         commissions: dict[str, float] = {}
+        competition_operators: dict[uuid.UUID, str] = {}
         competition_ids = {activation.competition_id for activation, _ in pairs}
         for competition_id in competition_ids:
             competition = db.get(IncentiveCompetition, competition_id)
             if competition:
+                competition_operators[competition_id] = competition.operator
                 for row in incentive_report(db, competition)["activations"]:
                     commissions[row["id"]] = row["commission"]
 
@@ -4122,6 +4124,7 @@ def consumer_activations_dashboard(
         customer_ids: set[uuid.UUID] = set()
         for activation, customer in pairs:
             serialized = serialize_incentive_activation(activation, customer.business_name)
+            serialized["operator"] = competition_operators.get(activation.competition_id, "WINDTRE")
             commission = commissions.get(str(activation.id), 0)
             serialized["commission"] = commission
             rows.append(serialized)

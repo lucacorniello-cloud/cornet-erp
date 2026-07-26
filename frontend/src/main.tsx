@@ -112,6 +112,22 @@ function Nav({active,icon,onClick,children}:{active:boolean;icon:React.ReactNode
   return <button className={active?"active":""} onClick={onClick}>{icon}<span>{children}</span></button>;
 }
 
+function OperatorLogo({operator="WINDTRE",compact=false}:{operator?:string;compact?:boolean}){
+  const raw=(operator||"ALTRO").trim();
+  const key=raw.toUpperCase().replace(/[^A-Z0-9]/g,"");
+  const aliases:Record<string,{label:string,short:string}>={
+    WINDTRE:{label:"WINDTRE",short:"W3"},W3:{label:"WINDTRE",short:"W3"},
+    VERY:{label:"very mobile",short:"very"},VERYMOBILE:{label:"very mobile",short:"very"},
+    VODAFONE:{label:"vodafone",short:"VF"},TIM:{label:"TIM",short:"TIM"},
+    FASTWEB:{label:"FASTWEB",short:"FW"},ILIAD:{label:"iliad",short:"iliad"},
+    EOLO:{label:"EOLO",short:"EOLO"},SKYWIFI:{label:"Sky Wifi",short:"Sky"},
+  };
+  const brand=aliases[key]||{label:raw.toUpperCase(),short:raw.slice(0,4).toUpperCase()};
+  return <span className={`operatorLogo operator-${key.toLowerCase()} ${compact?"compact":""}`} title={`Operatore ${brand.label}`} aria-label={`Operatore ${brand.label}`}>
+    <span className="operatorMark">{brand.short}</span>{!compact&&<span className="operatorName">{brand.label}</span>}
+  </span>;
+}
+
 function Dashboard({openImports}:{openImports:()=>void}){
   const [s,setS]=useState<any>(null);
   const [portfolio,setPortfolio]=useState<any>(null);
@@ -126,7 +142,7 @@ function Dashboard({openImports}:{openImports:()=>void}){
     ["ENERGY","Energia"],
   ];
   return <main className="page">
-    <div className="title"><div><small>CENTRO OPERATIVO</small><h1>Dashboard portafoglio</h1><p>Una vista distinta per ciascun mercato e linea di servizio.</p></div>{segment==="BUSINESS_SME"&&<button className="new" onClick={openImports}><UploadCloud size={18}/>Importa estrazione</button>}</div>
+    <div className="title"><div><small>CENTRO OPERATIVO</small><h1>Dashboard portafoglio</h1><p>Una vista distinta per ciascun mercato e linea di servizio.</p></div><div className="dashboardBrand"><OperatorLogo operator={segment==="BUSINESS_SME"?"WINDTRE":"MULTIOPERATORE"}/>{segment==="BUSINESS_SME"&&<button className="new" onClick={openImports}><UploadCloud size={18}/>Importa estrazione</button>}</div></div>
     <div className="segmenttabs">{segments.map(([value,label])=><button className={segment===value?"active":""} key={value} onClick={()=>setSegment(value)}>{label}</button>)}</div>
     <div className="status"><span></span><div><b>{last?"Ultima estrazione acquisita":"Pronto per la prima estrazione"}</b><p>{last?`${monthLabel(last.competence_month)} · ${last.customer_count} clienti · ${last.row_count} righe`:"Carica il file Excel mensile del DB Tool WINDTRE"}</p></div></div>
     <div className="portfolioKpis">
@@ -303,7 +319,7 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
   const summary=data?.summary||{};
   const maxDaily=Math.max(1,...(data?.daily||[]).map((item:any)=>item.events));
   return <main className="page consumerActivationPage">
-    <div className="title"><div><small>MONITORAGGIO CONSUMER</small><h1>Dashboard attivazioni Consumer</h1><p>PDC, utenze, quote gara e commissioning in un’unica vista operativa.</p></div><button className="new" onClick={openPdcImport}><UploadCloud/>Importa PDC</button></div>
+    <div className="title"><div><small>MONITORAGGIO CONSUMER</small><h1>Dashboard attivazioni Consumer</h1><p>PDC, utenze, quote gara e commissioning in un’unica vista operativa.</p></div><div className="dashboardBrand"><OperatorLogo operator="WINDTRE"/><button className="new" onClick={openPdcImport}><UploadCloud/>Importa PDC</button></div></div>
     <section className="consumerFilters">
       <label>Dal<input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/></label>
       <label>Al<input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></label>
@@ -335,7 +351,7 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
       <div className="sectiontitle"><div><AlertTriangle/><h2>Verifiche post-attivazione</h2></div><span>Segnalate ogni giorno fino alla gestione</span></div>
       <p>Seleziona “Da disattivare” sulle offerte o opzioni interessate. La scadenza viene impostata automaticamente al primo giorno lavorativo del mese successivo.</p>
       <div className="postActivationList">{(data?.post_activation_tasks||[]).map((item:any)=><article className={`postActivationItem ${item.alert_state.toLowerCase()}`} key={item.id}>
-        <div><b>{item.item_name}</b><small>{item.item_type==="OFFER"?"Offerta":"Opzione aggiuntiva"} · {item.customer_name}</small><small>Contratto {item.contract_code} · attivazione {formatDate(item.activation_date)}</small></div>
+        <div><div className="operatorLine"><OperatorLogo operator="WINDTRE" compact/><b>{item.item_name}</b></div><small>{item.item_type==="OFFER"?"Offerta":"Opzione aggiuntiva"} · {item.customer_name}</small><small>Contratto {item.contract_code} · attivazione {formatDate(item.activation_date)}</small></div>
         <label className="deactivationFlag"><input type="checkbox" checked={item.action_required} disabled={item.status==="DONE"} onChange={e=>updatePostActivationTask(item.id,{action_required:e.target.checked})}/><span>Da disattivare</span></label>
         <div className="postActivationDue"><span>{item.status==="DONE"?"Disattivata il":item.action_required?"Da gestire dal":"Da valutare"}</span><b>{item.status==="DONE"?formatDate(item.completed_date):item.due_date?formatDate(item.due_date):"—"}</b></div>
         {item.action_required&&item.status!=="DONE"?<button className="new" onClick={()=>updatePostActivationTask(item.id,{mark_completed:true})}><CheckCircle2/>Segna gestita</button>:<span className={`postActivationBadge ${item.alert_state.toLowerCase()}`}>{item.status==="DONE"?"Gestita":item.action_required?"Programmato":"Verifica"}</span>}
@@ -343,8 +359,8 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
     </section>
     <article className="tablecard consumerActivationTable">
       <div className="sectiontitle"><div><History/><h2>Ultime attivazioni Consumer</h2></div><span>{data?.activations?.length||0} record</span></div>
-      <table><thead><tr><th>Data</th><th>Cliente</th><th>Codice cliente</th><th>Codice contratto</th><th>Utenza</th><th>Pista / Offerta</th><th>Stato</th><th>Commissione</th></tr></thead>
-      <tbody>{(data?.activations||[]).map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name}</b></td><td><code>{item.customer_code||"—"}</code></td><td><code>{item.contract_code||"—"}</code></td><td>{item.asset_number||"—"}</td><td><b>{item.track}</b><small>{item.offer||"—"}</small></td><td><span className={`activationStatus ${item.status.toLowerCase()}`}>{item.status==="VALID"?"Valida":"Da verificare"}</span></td><td><b className="money">{formatCurrency(item.commission||0)}</b></td></tr>)}</tbody></table>
+      <table><thead><tr><th>Operatore</th><th>Data</th><th>Cliente</th><th>Codice cliente</th><th>Codice contratto</th><th>Utenza</th><th>Pista / Offerta</th><th>Stato</th><th>Commissione</th></tr></thead>
+      <tbody>{(data?.activations||[]).map((item:any)=><tr key={item.id}><td><OperatorLogo operator={item.operator||"WINDTRE"} compact/></td><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name}</b></td><td><code>{item.customer_code||"—"}</code></td><td><code>{item.contract_code||"—"}</code></td><td>{item.asset_number||"—"}</td><td><b>{item.track}</b><small>{item.offer||"—"}</small></td><td><span className={`activationStatus ${item.status.toLowerCase()}`}>{item.status==="VALID"?"Valida":"Da verificare"}</span></td><td><b className="money">{formatCurrency(item.commission||0)}</b></td></tr>)}</tbody></table>
     </article>
   </main>
 }
@@ -428,7 +444,7 @@ function IncentiveCompetitions(){
   }
   const tracks=selected?Object.entries(selected.configuration?.tracks||{}):[];
   return <main className="page incentivePage">
-    <div className="title"><div><small>CONTROLLO REMUNERAZIONI</small><h1>Gare e commissioning</h1><p>Configura le lettere incentivo, conteggia le attivazioni e controlla soglie e compensi.</p></div>{selected&&<div className="titleactions"><button className="secondary" onClick={duplicateCompetition}><Copy/>Duplica gara</button><button className="new" onClick={()=>setShowActivation(true)}><Plus/>Aggiungi attivazione</button></div>}</div>
+    <div className="title"><div><small>CONTROLLO REMUNERAZIONI</small><h1>Gare e commissioning</h1><p>Configura le lettere incentivo, conteggia le attivazioni e controlla soglie e compensi.</p></div>{selected&&<div className="dashboardBrand"><OperatorLogo operator={selected.operator}/><div className="titleactions"><button className="secondary" onClick={duplicateCompetition}><Copy/>Duplica gara</button><button className="new" onClick={()=>setShowActivation(true)}><Plus/>Aggiungi attivazione</button></div></div>}</div>
     {!items.length?<article className="competitionEmpty"><CircleDollarSign/><h2>Configura la prima gara</h2><p>Il modello riprende soglie e regole principali della lettera WINDTRE di marzo 2026. Potrai duplicarlo per i mesi successivi.</p><button className="new" disabled={busy} onClick={createMarch}>{busy?"Creazione…":"Crea modello Marzo 2026"}</button></article>:<>
       <div className="competitionSelector"><label>Gara<select value={selected?.id||""} onChange={e=>setSelected(items.find(item=>item.id===e.target.value))}>{items.map(item=><option value={item.id} key={item.id}>{item.name}</option>)}</select></label><Status value={selected?.status==="ACTIVE"?"ACTIVE":"DRAFT"}/><span>{formatDate(selected?.start_date)} - {formatDate(selected?.end_date)}</span></div>
       {selected&&<div className="competitionLayout">
@@ -456,7 +472,7 @@ function IncentiveCompetitions(){
         <div className="pdcConfirm"><label>Venditore<input value={pdcSeller} placeholder="Nome venditore" onChange={e=>setPdcSeller(e.target.value)}/></label>{!pdcPreview.proposed_entries?.some((item:any)=>item.track==="MOBILE")&&pdcPreview.document_type!=="WINDTRE_PDC_GA_FIXED"&&<label className="mobileVerify"><input type="checkbox" checked={includeMobile} onChange={e=>setIncludeMobile(e.target.checked)}/><span><b>Conteggia anche come nuova attivazione Mobile</b><small>Attivare solo dopo verifica quando la PDC non espone un’offerta mobile remunerabile.</small></span></label>}<button className="new" disabled={busy||pdcPreview.duplicate} onClick={importPdc}>{busy?"Importazione…":pdcPreview.duplicate?"PDC già importata":"Conferma importazione"}</button></div>
       </section>}
       {message&&<div className="notice ok"><CheckCircle2/>{message}</div>}
-      {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}
+      {report?.activations?.length>0&&<article className="tablecard incentiveTable"><table><thead><tr><th>Operatore</th><th>Data</th><th>Cliente / Utenza</th><th>Pista</th><th>Offerta</th><th>Punti</th><th>Soglia</th><th>Commissione</th><th></th></tr></thead><tbody>{report.activations.map((item:any)=><tr key={item.id}><td><OperatorLogo operator={selected?.operator||"WINDTRE"} compact/></td><td>{formatDate(item.activation_date)}</td><td><b>{item.customer_name||"Inserimento manuale"}</b><small>{item.asset_number}</small></td><td>{item.track}</td><td>{item.offer||"—"}</td><td>{item.points}</td><td>{item.threshold}</td><td><b className="money">{formatCurrency(item.commission)}</b></td><td><button className="icon danger" onClick={()=>removeActivation(item.id)}><Trash2/></button></td></tr>)}</tbody></table></article>}
       {pdcHistory.length>0&&<section className="pdcHistory"><div className="sectiontitle"><div><History/><h2>PDC importate</h2></div><span>{pdcHistory.length} documenti</span></div>{pdcHistory.map(item=><article key={item.id}><FileText/><div><b>{item.customer_name}</b><small>{item.file_name} · {new Date(item.imported_at).toLocaleString("it-IT")}</small></div><span>{item.activation_ids.length} quote</span><a className="secondary" href={API.replace(/\/api\/v1$/,"")+item.report_url} target="_blank"><Printer/>Report attivazione</a></article>)}</section>}
     </>}
     {showActivation&&<div className="overlay" onMouseDown={e=>{if(e.currentTarget===e.target)setShowActivation(false)}}><form className="drawer activationForm" onSubmit={addActivation}><button type="button" className="close" onClick={()=>setShowActivation(false)}>×</button><small>CONTEGGIO GARA</small><h2>Nuova attivazione</h2><div className="fieldgrid"><label>Data attivazione<input type="date" required value={activation.activation_date} onChange={e=>setActivation({...activation,activation_date:e.target.value})}/></label><label>Pista<select value={activation.track} onChange={e=>setActivation({...activation,track:e.target.value})}>{tracks.map(([code,config]:any)=><option value={code} key={code}>{config.label}</option>)}</select></label><label>Numero / identificativo<input value={activation.asset_number} onChange={e=>setActivation({...activation,asset_number:e.target.value})}/></label><label>Codice cliente<input value={activation.customer_code} onChange={e=>setActivation({...activation,customer_code:e.target.value})}/></label><label>Codice contratto<input value={activation.contract_code} onChange={e=>setActivation({...activation,contract_code:e.target.value})}/></label><label>Offerta<input value={activation.offer} onChange={e=>setActivation({...activation,offer:e.target.value})}/></label><label>Canone mensile (€)<input type="number" step=".01" value={activation.monthly_fee} onChange={e=>setActivation({...activation,monthly_fee:Number(e.target.value)})}/></label><label>Gettone diretto (€)<input type="number" step=".01" value={activation.direct_bonus} onChange={e=>setActivation({...activation,direct_bonus:Number(e.target.value)})}/></label><label>Venditore<input value={activation.seller_name} onChange={e=>setActivation({...activation,seller_name:e.target.value})}/></label></div><h3>Caratteristiche che modificano punteggio e compenso</h3><div className="attributeChecks">{Object.entries({mnp:"MNP",tied:"Tied / Easy Pay",piva:"Partita IVA",convergent:"Convergente",ftth:"FTTH",fwa:"FWA",very_mobile:"Very Mobile",secure_option:"Più Sicuri",phone_included:"Telefono Incluso",premium_tied_offer:"Offerta Tied premium"}).map(([key,label])=><label key={key}><input type="checkbox" checked={!!activation.attributes[key]} onChange={e=>setActivation({...activation,attributes:{...activation.attributes,[key]:e.target.checked}})}/>{label}</label>)}</div><div className="formactions"><button className="new" disabled={busy}>Salva e conteggia</button></div></form></div>}

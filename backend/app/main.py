@@ -4338,6 +4338,9 @@ def post_activation_rules(
     include_inactive: bool = True,
 ):
     with SessionLocal() as db:
+        for record in db.scalars(select(IncentivePdcImport)).all():
+            ensure_post_activation_tasks_for_record(db, record)
+        db.commit()
         statement = select(PostActivationRule)
         if operator:
             statement = statement.where(PostActivationRule.operator == clean(operator).upper())

@@ -293,6 +293,12 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
     const response=await fetch(`${API}/consumer-activations/dashboard?${query}`);
     setData(await response.json());setLoading(false);
   }
+  async function updatePostActivationTask(id:string,payload:any){
+    const response=await fetch(`${API}/post-activation-tasks/${id}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)
+    });
+    if(response.ok)load();
+  }
   useEffect(()=>{load()},[]);
   const summary=data?.summary||{};
   const maxDaily=Math.max(1,...(data?.daily||[]).map((item:any)=>item.events));
@@ -310,6 +316,7 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
       <article><span>Mobile / Fisso</span><strong>{summary.mobile||0} / {summary.fixed||0}</strong><small>nuove attivazioni</small></article>
       <article><span>Device / Reload</span><strong>{summary.customer_base||0} / {summary.reload||0}</strong><small>operazioni commerciali</small></article>
       <article><span>Canone mensile</span><strong>{formatCurrency(summary.monthly_revenue||0)}</strong><small>MRR importato</small></article>
+      <article className={summary.post_activation_pending?"attention":""}><span>Operazioni da effettuare</span><strong>{summary.post_activation_pending||0}</strong><small>{summary.post_activation_overdue||0} scadute · {summary.post_activation_review||0} da valutare</small></article>
       <article className="highlight"><span>Commissioning stimato</span><strong>{formatCurrency(summary.commissioning||0)}</strong><small>soglie correnti</small></article>
     </div>
     <div className="consumerDashboardGrid">
@@ -324,6 +331,16 @@ function ConsumerActivationsDashboard({openPdcImport}:{openPdcImport:()=>void}){
         <div className="consumerBreakdown">{(data?.tracks||[]).map((item:any)=><article key={item.track}><span>{item.track}</span><strong>{item.events}</strong></article>)}</div>
       </section>
     </div>
+    <section className="postActivationPanel">
+      <div className="sectiontitle"><div><AlertTriangle/><h2>Verifiche post-attivazione</h2></div><span>Segnalate ogni giorno fino alla gestione</span></div>
+      <p>Seleziona “Da disattivare” sulle offerte o opzioni interessate. La scadenza viene impostata automaticamente al primo giorno lavorativo del mese successivo.</p>
+      <div className="postActivationList">{(data?.post_activation_tasks||[]).map((item:any)=><article className={`postActivationItem ${item.alert_state.toLowerCase()}`} key={item.id}>
+        <div><b>{item.item_name}</b><small>{item.item_type==="OFFER"?"Offerta":"Opzione aggiuntiva"} · {item.customer_name}</small><small>Contratto {item.contract_code} · attivazione {formatDate(item.activation_date)}</small></div>
+        <label className="deactivationFlag"><input type="checkbox" checked={item.action_required} disabled={item.status==="DONE"} onChange={e=>updatePostActivationTask(item.id,{action_required:e.target.checked})}/><span>Da disattivare</span></label>
+        <div className="postActivationDue"><span>{item.status==="DONE"?"Disattivata il":item.action_required?"Da gestire dal":"Da valutare"}</span><b>{item.status==="DONE"?formatDate(item.completed_date):item.due_date?formatDate(item.due_date):"—"}</b></div>
+        {item.action_required&&item.status!=="DONE"?<button className="new" onClick={()=>updatePostActivationTask(item.id,{mark_completed:true})}><CheckCircle2/>Segna gestita</button>:<span className={`postActivationBadge ${item.alert_state.toLowerCase()}`}>{item.status==="DONE"?"Gestita":item.action_required?"Programmato":"Verifica"}</span>}
+      </article>)}</div>
+    </section>
     <article className="tablecard consumerActivationTable">
       <div className="sectiontitle"><div><History/><h2>Ultime attivazioni Consumer</h2></div><span>{data?.activations?.length||0} record</span></div>
       <table><thead><tr><th>Data</th><th>Cliente</th><th>Codice cliente</th><th>Codice contratto</th><th>Utenza</th><th>Pista / Offerta</th><th>Stato</th><th>Commissione</th></tr></thead>

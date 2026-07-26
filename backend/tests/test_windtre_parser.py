@@ -1,4 +1,5 @@
 from io import BytesIO
+from datetime import date
 import unittest
 
 from openpyxl import Workbook
@@ -12,12 +13,34 @@ from app.main import (
     normalize_iccid,
     parse_uploaded_table,
     find_activation_date,
+    first_business_day_next_month,
     parse_monthly_fee,
+    pdc_post_activation_items,
     parse_workbook,
 )
 
 
 class WindTreParserTests(unittest.TestCase):
+    def test_schedules_post_activation_on_first_weekday_of_next_month(self):
+        self.assertEqual(first_business_day_next_month(date(2026, 3, 30)), date(2026, 4, 1))
+        self.assertEqual(first_business_day_next_month(date(2026, 4, 20)), date(2026, 5, 1))
+        self.assertEqual(first_business_day_next_month(date(2026, 7, 15)), date(2026, 8, 3))
+
+    def test_extracts_offer_and_post_activation_options(self):
+        items = pdc_post_activation_items(
+            "Super Fibra",
+            "GIGA illimitati per le tue SIM - Più Sicuri Casa&Ufficio - Contributo rateizzato",
+        )
+        self.assertEqual(
+            [(item["type"], item["name"]) for item in items],
+            [
+                ("OFFER", "Super Fibra"),
+                ("OPTION", "GIGA illimitati per le tue SIM"),
+                ("OPTION", "Più Sicuri Casa&Ufficio"),
+                ("OPTION", "Contributo rateizzato"),
+            ],
+        )
+
     def make_file(self):
         workbook = Workbook()
         sheet = workbook.active

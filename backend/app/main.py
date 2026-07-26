@@ -180,6 +180,35 @@ class IncentivePdcImport(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class PostActivationTask(Base):
+    __tablename__ = "post_activation_tasks"
+    __table_args__ = (
+        UniqueConstraint("pdc_import_id", "item_key", name="uq_post_activation_task_item"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pdc_import_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incentive_pdc_imports.id", ondelete="CASCADE"), index=True
+    )
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), index=True)
+    item_key: Mapped[str] = mapped_column(String(255))
+    item_type: Mapped[str] = mapped_column(String(30), default="OPTION")
+    item_name: Mapped[str] = mapped_column(String(500))
+    customer_code: Mapped[str | None] = mapped_column(String(120), index=True)
+    contract_code: Mapped[str | None] = mapped_column(String(120), index=True)
+    asset_number: Mapped[str | None] = mapped_column(String(120))
+    activation_date: Mapped[date] = mapped_column(Date, index=True)
+    action_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="REVIEW", index=True)
+    due_date: Mapped[date | None] = mapped_column(Date, index=True)
+    completed_date: Mapped[date | None] = mapped_column(Date)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class WindTreImport(Base):
     __tablename__ = "windtre_imports"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -721,6 +750,13 @@ class IncentiveActivationRequest(BaseModel):
     direct_bonus: float = 0
     attributes: dict[str, Any] = Field(default_factory=dict)
     status: str = "VALID"
+    notes: str | None = None
+
+
+class PostActivationTaskUpdate(BaseModel):
+    action_required: bool | None = None
+    mark_completed: bool = False
+    completed_date: date | None = None
     notes: str | None = None
 
 
@@ -1394,6 +1430,45 @@ def pdc_reload_base_bonus(device_price: float) -> float:
     return 14.0
 
 
+def first_business_day_next_month(value: date) -> date:
+    candidate = (value.replace(day=28) + timedelta(days=4)).replace(day=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def pdc_post_activation_items(offer: str, options: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(item_type: str, name: str):
+        normalized_name = re.sub(r"\s+", " ", name).strip(" -:;.")
+        key = normalize_header(f"{item_type}_{normalized_name}")[:255]
+        if normalized_name and key not in seen:
+            seen.add(key)
+            items.append({"key": key, "type": item_type, "name": normalized_name})
+
+    add("OFFER", offer)
+    known_options = (
+        r"GIGA illimitati per le tue SIM",
+        r"Giga Illimitati super Fibra",
+        r"Pi[uù]'?\s*Sicuri Casa&Ufficio",
+        r"Pi[uù]'?\s*Sicuri Mobile(?: Easy Pay)?",
+        r"Contributo rateizzato",
+        r"Convergenza Special",
+        r"Smartphone Reload",
+        r"Sconto Rata Telefono Incluso PRE New",
+        r"Vendita a rate",
+        r"Reload Forever Basic",
+        r"Segreteria Telefonica",
+    )
+    for pattern in known_options:
+        match = re.search(pattern, options, re.IGNORECASE)
+        if match:
+            add("OPTION", match.group(0))
+    return items
+
+
 def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     text = pdf_document_text(contents)
     upper = text.upper()
@@ -1538,6 +1613,8 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
             "new_mobile_activation": False,
             "reason": "PDC con vendita a rate/Reload su linea esistente; classificata Customer Base salvo verifica operatore",
         }
+    effective_offer = fixed_offer if is_fixed_ga else (mobile_offer or plan)
+    effective_options = fixed_options if is_fixed_ga else options
     return {
         "document_type": document_type,
         "file_name": file_name,
@@ -1554,8 +1631,8 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
             "operator": "WINDTRE", "market": "CONSUMER", "customer_code": customer_code,
             "contract_code": contract_code, "activation_date": activation_date.isoformat() if activation_date else None,
             "dealer_code": dealer_code, "phone": phone, "iccid": iccid,
-            "plan": fixed_offer if is_fixed_ga else (mobile_offer or plan),
-            "options": fixed_options if is_fixed_ga else options, "payment_method": payment_method,
+            "plan": effective_offer,
+            "options": effective_options, "payment_method": payment_method,
         },
         "device": {
             "imei": imei, "model": device_model, "price": device_price, "upfront": upfront,
@@ -1564,7 +1641,63 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
         },
         "classification": classification,
         "proposed_entries": proposed_entries,
+        "post_activation_items": pdc_post_activation_items(effective_offer, effective_options),
         "warnings": warnings,
+    }
+
+
+def ensure_post_activation_tasks_for_record(db, record: IncentivePdcImport) -> int:
+    extracted = record.extracted_data or {}
+    contract = extracted.get("contract", {})
+    activation_date = parsed_date(contract.get("activation_date", ""))
+    if not activation_date:
+        return 0
+    items = extracted.get("post_activation_items") or pdc_post_activation_items(
+        contract.get("plan", ""), contract.get("options", "")
+    )
+    existing = set(db.scalars(
+        select(PostActivationTask.item_key).where(PostActivationTask.pdc_import_id == record.id)
+    ).all())
+    added = 0
+    for item in items:
+        if item["key"] in existing:
+            continue
+        db.add(PostActivationTask(
+            pdc_import_id=record.id, customer_id=record.customer_id,
+            item_key=item["key"], item_type=item["type"], item_name=item["name"],
+            customer_code=contract.get("customer_code") or None,
+            contract_code=contract.get("contract_code") or None,
+            asset_number=contract.get("phone") or ("NUOVA LINEA" if extracted.get("document_type") == "WINDTRE_PDC_GA_FIXED" else None),
+            activation_date=activation_date, action_required=False, status="REVIEW",
+        ))
+        existing.add(item["key"])
+        added += 1
+    return added
+
+
+def serialize_post_activation_task(item: PostActivationTask, customer_name: str = "") -> dict[str, Any]:
+    today = date.today()
+    if item.status == "DONE":
+        alert_state = "DONE"
+    elif not item.action_required:
+        alert_state = "REVIEW"
+    elif item.due_date and item.due_date < today:
+        alert_state = "OVERDUE"
+    elif item.due_date == today:
+        alert_state = "DUE_TODAY"
+    else:
+        alert_state = "SCHEDULED"
+    return {
+        "id": str(item.id), "pdc_import_id": str(item.pdc_import_id),
+        "customer_id": str(item.customer_id) if item.customer_id else None,
+        "customer_name": customer_name, "item_key": item.item_key,
+        "item_type": item.item_type, "item_name": item.item_name,
+        "customer_code": item.customer_code or "", "contract_code": item.contract_code or "",
+        "asset_number": item.asset_number or "", "activation_date": item.activation_date.isoformat(),
+        "action_required": item.action_required, "status": item.status,
+        "due_date": item.due_date.isoformat() if item.due_date else None,
+        "completed_date": item.completed_date.isoformat() if item.completed_date else None,
+        "alert_state": alert_state, "notes": item.notes or "",
     }
 
 
@@ -3772,6 +3905,8 @@ async def import_incentive_pdc(
             status="IMPORTED", extracted_data=parsed, activation_ids=activation_ids,
         )
         db.add(record)
+        db.flush()
+        ensure_post_activation_tasks_for_record(db, record)
         db.commit()
         return {
             "id": str(record.id), "customer_id": str(customer.id), "customer_name": customer.business_name,
@@ -3950,6 +4085,15 @@ def consumer_activations_dashboard(
     date_to: date | None = Query(None),
 ):
     with SessionLocal() as db:
+        consumer_pdc_records = db.scalars(
+            select(IncentivePdcImport)
+            .join(Customer, Customer.id == IncentivePdcImport.customer_id)
+            .where(Customer.segment == "CONSUMER")
+        ).all()
+        for record in consumer_pdc_records:
+            ensure_post_activation_tasks_for_record(db, record)
+        db.commit()
+
         statement = (
             select(IncentiveActivation, Customer)
             .join(Customer, Customer.id == IncentiveActivation.customer_id)
@@ -4003,6 +4147,34 @@ def consumer_activations_dashboard(
                 IncentivePdcImport.extracted_data["contract"]["activation_date"].astext <= date_to.isoformat()
             )
         pdc_count = db.scalar(pdc_statement) or 0
+        task_statement = (
+            select(PostActivationTask, Customer)
+            .join(Customer, Customer.id == PostActivationTask.customer_id)
+            .where(Customer.segment == "CONSUMER")
+        )
+        if date_from:
+            task_statement = task_statement.where(PostActivationTask.activation_date >= date_from)
+        if date_to:
+            task_statement = task_statement.where(PostActivationTask.activation_date <= date_to)
+        task_pairs = db.execute(
+            task_statement.order_by(PostActivationTask.activation_date.desc(), PostActivationTask.created_at.desc())
+        ).all()
+        post_activation_tasks = [
+            serialize_post_activation_task(task, customer.business_name)
+            for task, customer in task_pairs
+        ]
+        post_activation_tasks.sort(key=lambda item: (
+            {"OVERDUE": 0, "DUE_TODAY": 1, "SCHEDULED": 2, "REVIEW": 3, "DONE": 4}.get(item["alert_state"], 5),
+            item["due_date"] or "9999-12-31",
+        ))
+        pending_tasks = [
+            item for item in post_activation_tasks
+            if item["action_required"] and item["status"] != "DONE"
+        ]
+        review_tasks = [
+            item for item in post_activation_tasks
+            if not item["action_required"] and item["status"] == "REVIEW"
+        ]
 
         return {
             "filters": {
@@ -4021,12 +4193,40 @@ def consumer_activations_dashboard(
                 "reload": track_counts.get("RELOAD", 0),
                 "monthly_revenue": round(sum(item.monthly_fee_cents for item, _ in pairs) / 100, 2),
                 "commissioning": round(sum(commissions.get(str(item.id), 0) for item, _ in pairs), 2),
+                "post_activation_pending": len(pending_tasks),
+                "post_activation_overdue": sum(item["alert_state"] == "OVERDUE" for item in pending_tasks),
+                "post_activation_review": len(review_tasks),
             },
             "tracks": [{"track": key, "events": value} for key, value in sorted(track_counts.items())],
             "statuses": [{"status": key, "events": value} for key, value in sorted(status_counts.items())],
             "daily": [daily[key] for key in sorted(daily)],
             "activations": rows[:100],
+            "post_activation_tasks": post_activation_tasks,
         }
+
+
+@app.patch("/api/v1/post-activation-tasks/{task_id}")
+def update_post_activation_task(task_id: uuid.UUID, data: PostActivationTaskUpdate):
+    with SessionLocal() as db:
+        item = db.get(PostActivationTask, task_id)
+        if not item:
+            raise HTTPException(404, "Verifica post-attivazione non trovata")
+        if data.mark_completed:
+            if not item.action_required:
+                raise HTTPException(422, "Seleziona prima l'opzione come da disattivare")
+            item.status = "DONE"
+            item.completed_date = data.completed_date or date.today()
+        elif data.action_required is not None:
+            item.action_required = data.action_required
+            item.status = "PENDING" if data.action_required else "REVIEW"
+            item.due_date = first_business_day_next_month(item.activation_date) if data.action_required else None
+            item.completed_date = None
+        if data.notes is not None:
+            item.notes = clean(data.notes) or None
+        db.commit()
+        db.refresh(item)
+        customer = db.get(Customer, item.customer_id) if item.customer_id else None
+        return serialize_post_activation_task(item, customer.business_name if customer else "")
 
 
 @app.get("/api/v1/incentives/{competition_id}/report")

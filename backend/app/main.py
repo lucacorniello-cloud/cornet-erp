@@ -209,6 +209,27 @@ class PostActivationTask(Base):
     )
 
 
+class PostActivationRule(Base):
+    __tablename__ = "post_activation_rules"
+    __table_args__ = (
+        UniqueConstraint("operator", "item_type", "item_key", name="uq_post_activation_rule_item"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operator: Mapped[str] = mapped_column(String(80), default="WINDTRE", index=True)
+    item_type: Mapped[str] = mapped_column(String(30), index=True)
+    item_key: Mapped[str] = mapped_column(String(255))
+    item_name: Mapped[str] = mapped_column(String(500))
+    can_deactivate: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    default_action_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class WindTreImport(Base):
     __tablename__ = "windtre_imports"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -757,6 +778,23 @@ class PostActivationTaskUpdate(BaseModel):
     action_required: bool | None = None
     mark_completed: bool = False
     completed_date: date | None = None
+    notes: str | None = None
+
+
+class PostActivationRuleRequest(BaseModel):
+    operator: str = "WINDTRE"
+    item_type: str
+    item_name: str
+    can_deactivate: bool = False
+    default_action_required: bool = False
+    is_active: bool = True
+    notes: str | None = None
+
+
+class PostActivationRuleUpdate(BaseModel):
+    can_deactivate: bool | None = None
+    default_action_required: bool | None = None
+    is_active: bool | None = None
     notes: str | None = None
 
 
@@ -1646,6 +1684,33 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     }
 
 
+def post_activation_rule_key(item_type: str, item_name: str) -> str:
+    return normalize_header(f"{item_type}_{item_name}")[:255]
+
+
+def ensure_post_activation_rule(
+    db, item_type: str, item_name: str, operator: str = "WINDTRE"
+) -> PostActivationRule:
+    item_key = post_activation_rule_key(item_type, item_name)
+    rule = db.scalar(select(PostActivationRule).where(
+        PostActivationRule.operator == operator,
+        PostActivationRule.item_type == item_type,
+        PostActivationRule.item_key == item_key,
+    ))
+    if rule:
+        if rule.item_name != item_name:
+            rule.item_name = item_name
+        return rule
+    rule = PostActivationRule(
+        operator=operator, item_type=item_type, item_key=item_key,
+        item_name=item_name, can_deactivate=False,
+        default_action_required=False, is_active=True,
+    )
+    db.add(rule)
+    db.flush()
+    return rule
+
+
 def ensure_post_activation_tasks_for_record(db, record: IncentivePdcImport) -> int:
     extracted = record.extracted_data or {}
     contract = extracted.get("contract", {})
@@ -1660,22 +1725,28 @@ def ensure_post_activation_tasks_for_record(db, record: IncentivePdcImport) -> i
     ).all())
     added = 0
     for item in items:
+        rule = ensure_post_activation_rule(db, item["type"], item["name"])
         if item["key"] in existing:
             continue
+        action_required = bool(rule.is_active and rule.can_deactivate and rule.default_action_required)
         db.add(PostActivationTask(
             pdc_import_id=record.id, customer_id=record.customer_id,
             item_key=item["key"], item_type=item["type"], item_name=item["name"],
             customer_code=contract.get("customer_code") or None,
             contract_code=contract.get("contract_code") or None,
             asset_number=contract.get("phone") or ("NUOVA LINEA" if extracted.get("document_type") == "WINDTRE_PDC_GA_FIXED" else None),
-            activation_date=activation_date, action_required=False, status="REVIEW",
+            activation_date=activation_date, action_required=action_required,
+            status="PENDING" if action_required else "REVIEW",
+            due_date=first_business_day_next_month(activation_date) if action_required else None,
         ))
         existing.add(item["key"])
         added += 1
     return added
 
 
-def serialize_post_activation_task(item: PostActivationTask, customer_name: str = "") -> dict[str, Any]:
+def serialize_post_activation_task(
+    item: PostActivationTask, customer_name: str = "", rule: PostActivationRule | None = None
+) -> dict[str, Any]:
     today = date.today()
     if item.status == "DONE":
         alert_state = "DONE"
@@ -1698,6 +1769,20 @@ def serialize_post_activation_task(item: PostActivationTask, customer_name: str 
         "due_date": item.due_date.isoformat() if item.due_date else None,
         "completed_date": item.completed_date.isoformat() if item.completed_date else None,
         "alert_state": alert_state, "notes": item.notes or "",
+        "operator": rule.operator if rule else "WINDTRE",
+        "can_deactivate": bool(rule and rule.is_active and rule.can_deactivate),
+        "configuration_status": "CONFIGURED" if rule and rule.can_deactivate else "NOT_ENABLED",
+    }
+
+
+def serialize_post_activation_rule(item: PostActivationRule) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "operator": item.operator, "item_type": item.item_type,
+        "item_key": item.item_key, "item_name": item.item_name,
+        "can_deactivate": item.can_deactivate,
+        "default_action_required": item.default_action_required,
+        "is_active": item.is_active, "notes": item.notes or "",
+        "created_at": item.created_at.isoformat(), "updated_at": item.updated_at.isoformat(),
     }
 
 
@@ -4162,8 +4247,15 @@ def consumer_activations_dashboard(
         task_pairs = db.execute(
             task_statement.order_by(PostActivationTask.activation_date.desc(), PostActivationTask.created_at.desc())
         ).all()
+        rule_items = db.scalars(select(PostActivationRule)).all()
+        rules_by_key = {
+            (rule.operator, rule.item_type, rule.item_key): rule for rule in rule_items
+        }
         post_activation_tasks = [
-            serialize_post_activation_task(task, customer.business_name)
+            serialize_post_activation_task(
+                task, customer.business_name,
+                rules_by_key.get(("WINDTRE", task.item_type, task.item_key)),
+            )
             for task, customer in task_pairs
         ]
         post_activation_tasks.sort(key=lambda item: (
@@ -4214,12 +4306,19 @@ def update_post_activation_task(task_id: uuid.UUID, data: PostActivationTaskUpda
         item = db.get(PostActivationTask, task_id)
         if not item:
             raise HTTPException(404, "Verifica post-attivazione non trovata")
+        rule = db.scalar(select(PostActivationRule).where(
+            PostActivationRule.operator == "WINDTRE",
+            PostActivationRule.item_type == item.item_type,
+            PostActivationRule.item_key == item.item_key,
+        ))
         if data.mark_completed:
             if not item.action_required:
                 raise HTTPException(422, "Seleziona prima l'opzione come da disattivare")
             item.status = "DONE"
             item.completed_date = data.completed_date or date.today()
         elif data.action_required is not None:
+            if data.action_required and not (rule and rule.is_active and rule.can_deactivate):
+                raise HTTPException(422, "Abilita prima la disattivazione nella configurazione post-vendita")
             item.action_required = data.action_required
             item.status = "PENDING" if data.action_required else "REVIEW"
             item.due_date = first_business_day_next_month(item.activation_date) if data.action_required else None
@@ -4229,7 +4328,89 @@ def update_post_activation_task(task_id: uuid.UUID, data: PostActivationTaskUpda
         db.commit()
         db.refresh(item)
         customer = db.get(Customer, item.customer_id) if item.customer_id else None
-        return serialize_post_activation_task(item, customer.business_name if customer else "")
+        return serialize_post_activation_task(item, customer.business_name if customer else "", rule)
+
+
+@app.get("/api/v1/post-activation-rules")
+def post_activation_rules(
+    operator: str | None = None,
+    item_type: str | None = None,
+    include_inactive: bool = True,
+):
+    with SessionLocal() as db:
+        statement = select(PostActivationRule)
+        if operator:
+            statement = statement.where(PostActivationRule.operator == clean(operator).upper())
+        if item_type:
+            statement = statement.where(PostActivationRule.item_type == clean(item_type).upper())
+        if not include_inactive:
+            statement = statement.where(PostActivationRule.is_active.is_(True))
+        items = db.scalars(statement.order_by(
+            PostActivationRule.operator, PostActivationRule.item_type, PostActivationRule.item_name
+        )).all()
+        return [serialize_post_activation_rule(item) for item in items]
+
+
+@app.post("/api/v1/post-activation-rules")
+def create_post_activation_rule(data: PostActivationRuleRequest):
+    operator = clean(data.operator).upper() or "WINDTRE"
+    item_type = clean(data.item_type).upper()
+    item_name = clean(data.item_name)
+    if item_type not in {"OFFER", "SERVICE", "OPTION"}:
+        raise HTTPException(422, "Tipologia non valida")
+    if not item_name:
+        raise HTTPException(422, "Nome obbligatorio")
+    item_key = post_activation_rule_key(item_type, item_name)
+    with SessionLocal() as db:
+        if db.scalar(select(PostActivationRule).where(
+            PostActivationRule.operator == operator,
+            PostActivationRule.item_type == item_type,
+            PostActivationRule.item_key == item_key,
+        )):
+            raise HTTPException(409, "Elemento già presente")
+        rule = PostActivationRule(
+            operator=operator, item_type=item_type, item_key=item_key, item_name=item_name,
+            can_deactivate=data.can_deactivate,
+            default_action_required=data.default_action_required and data.can_deactivate,
+            is_active=data.is_active, notes=clean(data.notes) or None,
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+        return serialize_post_activation_rule(rule)
+
+
+@app.patch("/api/v1/post-activation-rules/{rule_id}")
+def update_post_activation_rule(rule_id: uuid.UUID, data: PostActivationRuleUpdate):
+    with SessionLocal() as db:
+        rule = db.get(PostActivationRule, rule_id)
+        if not rule:
+            raise HTTPException(404, "Configurazione non trovata")
+        if data.can_deactivate is not None:
+            rule.can_deactivate = data.can_deactivate
+            if not data.can_deactivate:
+                rule.default_action_required = False
+        if data.default_action_required is not None:
+            if data.default_action_required and not rule.can_deactivate:
+                raise HTTPException(422, "Abilita prima la possibilità di disattivazione")
+            rule.default_action_required = data.default_action_required
+        if data.is_active is not None:
+            rule.is_active = data.is_active
+        if data.notes is not None:
+            rule.notes = clean(data.notes) or None
+        if rule.can_deactivate and rule.default_action_required and rule.is_active:
+            pending_items = db.scalars(select(PostActivationTask).where(
+                PostActivationTask.item_type == rule.item_type,
+                PostActivationTask.item_key == rule.item_key,
+                PostActivationTask.status == "REVIEW",
+            )).all()
+            for item in pending_items:
+                item.action_required = True
+                item.status = "PENDING"
+                item.due_date = first_business_day_next_month(item.activation_date)
+        db.commit()
+        db.refresh(rule)
+        return serialize_post_activation_rule(rule)
 
 
 @app.get("/api/v1/incentives/{competition_id}/report")

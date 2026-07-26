@@ -3822,16 +3822,28 @@ def incentive_pdc_activation_report(competition_id: uuid.UUID, pdc_import_id: uu
     contract = extracted.get("contract", {})
     device = extracted.get("device", {})
     customer_data = extracted.get("customer", {})
+    number_iccid = " · ".join(value for value in (contract.get("phone"), contract.get("iccid")) if value) or "Nuova linea - numerazione da assegnare"
+    terminal_parts = []
+    if device.get("model"):
+        terminal_parts.append(device["model"])
+    if device.get("imei"):
+        terminal_parts.append(f"IMEI {device['imei']}")
+    terminal_description = " · ".join(terminal_parts) or "Non presente nella PDC"
+    price_installments = (
+        f"€ {device.get('price',0):.2f} · {device.get('installments',0)} rate"
+        if device.get("price") or device.get("installments")
+        else "Non applicabile / non presente"
+    )
     summary = [
         ["Cliente", customer.business_name if customer else customer_data.get("business_name", "")],
         ["Codice fiscale", customer_data.get("fiscal_code", "")],
         ["Codice cliente", contract.get("customer_code", "")],
         ["Codice contratto", contract.get("contract_code", "")],
         ["Data attivazione", format_date_it(contract.get("activation_date"))],
-        ["Numero / ICCID", f"{contract.get('phone','')} · {contract.get('iccid','')}"],
+        ["Numero / ICCID", number_iccid],
         ["Piano", contract.get("plan", "")],
-        ["Terminale", f"{device.get('model','')} · IMEI {device.get('imei','')}"],
-        ["Prezzo / rate", f"€ {device.get('price',0):.2f} · {device.get('installments',0)} rate"],
+        ["Terminale", terminal_description],
+        ["Prezzo / rate", price_installments],
         ["Pagamento", contract.get("payment_method", "")],
     ]
     table = Table(summary, colWidths=[44*mm, 132*mm])
@@ -3842,7 +3854,7 @@ def incentive_pdc_activation_report(competition_id: uuid.UUID, pdc_import_id: uu
     for activation in activations:
         row = row_by_id.get(str(activation.id), {})
         quota_data.append([
-            activation.track, activation.notes or activation.offer or "", row.get("points", 0),
+            activation.track, f"{activation.notes or activation.offer or ''}{' (da verificare)' if activation.status == 'TO_VERIFY' else ''}", row.get("points", 0),
             row.get("threshold", "Non raggiunta"), f"€ {activation.direct_bonus_cents/100:.2f}",
             f"€ {row.get('commission',0):.2f}",
         ])

@@ -1424,7 +1424,11 @@ def parse_windtre_pdc(contents: bytes, file_name: str = "") -> dict[str, Any]:
     document_number = regex_value(text, r"Numero:\s*([A-Z0-9]+)\s+Data Rilascio:")
     issue_date_text = regex_value(text, r"Data Rilascio:\s*(\d{2}/\d{2}/\d{4})")
     activation_date = parsed_date(activation_date_text)
-    is_piva = bool(regex_value(text, r"Partita Iva/Cod\.Fiscale Azienda:\s*([A-Z0-9]+)"))
+    company_tax_id = regex_value(
+        text,
+        r"Partita Iva/Cod\.Fiscale Azienda:[ \t]*(\d{11})(?:\s|$)",
+    )
+    is_piva = bool(company_tax_id)
     proposed_entries = []
     if imei:
         proposed_entries.append({

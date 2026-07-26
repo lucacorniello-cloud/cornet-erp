@@ -307,6 +307,19 @@ class StoreSettings(Base):
     )
 
 
+class OperatorBrand(Base):
+    __tablename__ = "operator_brands"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operator: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    logo_path: Mapped[str | None] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Product(Base):
     __tablename__ = "products"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1974,6 +1987,29 @@ def get_or_create_store_settings(db) -> StoreSettings:
     return item
 
 
+DEFAULT_OPERATOR_BRANDS = (
+    ("WINDTRE", "WINDTRE"), ("VERY MOBILE", "Very Mobile"),
+    ("VODAFONE", "Vodafone"), ("TIM", "TIM"), ("FASTWEB", "Fastweb"),
+    ("ILIAD", "Iliad"), ("EOLO", "EOLO"), ("SKY WIFI", "Sky Wifi"),
+)
+
+
+def ensure_operator_brands(db):
+    existing = set(db.scalars(select(OperatorBrand.operator)).all())
+    for operator, display_name in DEFAULT_OPERATOR_BRANDS:
+        if operator not in existing:
+            db.add(OperatorBrand(operator=operator, display_name=display_name, is_active=True))
+    db.flush()
+
+
+def serialize_operator_brand(item: OperatorBrand) -> dict[str, Any]:
+    return {
+        "id": str(item.id), "operator": item.operator, "display_name": item.display_name,
+        "logo_url": f"/uploads/{item.logo_path}" if item.logo_path else None,
+        "is_active": item.is_active, "updated_at": item.updated_at.isoformat(),
+    }
+
+
 @app.post("/api/v1/auth/login")
 def login(data: LoginRequest):
     with SessionLocal() as db:
@@ -2060,6 +2096,46 @@ async def upload_partner_logo(file: UploadFile = File(...)):
             if previous_path.is_file():
                 previous_path.unlink()
         return serialize_store_settings(item)
+
+
+@app.get("/api/v1/settings/operator-brands")
+def operator_brands():
+    with SessionLocal() as db:
+        ensure_operator_brands(db)
+        db.commit()
+        items = db.scalars(select(OperatorBrand).order_by(OperatorBrand.display_name)).all()
+        return [serialize_operator_brand(item) for item in items]
+
+
+@app.post("/api/v1/settings/operator-brands/{operator}/logo")
+async def upload_operator_brand_logo(operator: str, file: UploadFile = File(...)):
+    allowed_types = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/svg+xml": ".svg"}
+    extension = allowed_types.get(file.content_type or "")
+    if not extension:
+        raise HTTPException(422, "Carica un logo PNG, JPG, WEBP o SVG")
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Il logo supera il limite di 5 MB")
+    operator_code = clean(operator).upper()
+    with SessionLocal() as db:
+        ensure_operator_brands(db)
+        item = db.scalar(select(OperatorBrand).where(OperatorBrand.operator == operator_code))
+        if not item:
+            item = OperatorBrand(operator=operator_code, display_name=operator_code, is_active=True)
+            db.add(item)
+            db.flush()
+        safe_code = normalize_header(operator_code).lower() or "operatore"
+        filename = f"operator-{safe_code}-{item.id}{extension}"
+        (UPLOAD_DIR / filename).write_bytes(contents)
+        previous = item.logo_path
+        item.logo_path = filename
+        db.commit()
+        db.refresh(item)
+        if previous and previous != filename:
+            previous_path = UPLOAD_DIR / previous
+            if previous_path.is_file():
+                previous_path.unlink()
+        return serialize_operator_brand(item)
 
 
 def get_or_create_letterhead(db) -> LetterheadTemplate:
@@ -4031,14 +4107,20 @@ def incentive_pdc_activation_report(competition_id: uuid.UUID, pdc_import_id: uu
         report_rows = [row for row in full_report["activations"] if row["id"] in set(record.activation_ids or [])]
         customer = db.get(Customer, record.customer_id) if record.customer_id else None
         extracted = record.extracted_data or {}
+        operator_brand = db.scalar(select(OperatorBrand).where(OperatorBrand.operator == competition.operator))
     stream = BytesIO()
     document = SimpleDocTemplate(stream, pagesize=A4, leftMargin=16*mm, rightMargin=16*mm, topMargin=14*mm, bottomMargin=14*mm)
     styles = getSampleStyleSheet()
-    story = [
+    story = []
+    if operator_brand and operator_brand.logo_path:
+        logo_path = UPLOAD_DIR / operator_brand.logo_path
+        if logo_path.is_file():
+            story.extend([Image(str(logo_path), width=42*mm, height=16*mm), Spacer(1, 4*mm)])
+    story.extend([
         Paragraph("Report importazione attivazione PDC", styles["Title"]),
         Paragraph(f"{competition.name} · Dealer {competition.dealer_code or 'non indicato'}", styles["Normal"]),
         Spacer(1, 5*mm),
-    ]
+    ])
     contract = extracted.get("contract", {})
     device = extracted.get("device", {})
     customer_data = extracted.get("customer", {})
@@ -4469,10 +4551,20 @@ def export_incentive_report_pdf(competition_id: uuid.UUID):
         if not competition:
             raise HTTPException(404, "Gara non trovata")
         report = incentive_report(db, competition)
+        operator_brand = db.scalar(select(OperatorBrand).where(OperatorBrand.operator == competition.operator))
     stream = BytesIO()
     document = SimpleDocTemplate(stream, pagesize=landscape(A4), leftMargin=14 * mm, rightMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
     styles = getSampleStyleSheet()
-    story = [Paragraph(competition.name, styles["Title"]), Paragraph(f"Periodo {competition.start_date.strftime('%d/%m/%Y')} - {competition.end_date.strftime('%d/%m/%Y')} · Dealer {competition.dealer_code or 'non indicato'}", styles["Normal"]), Spacer(1, 5 * mm)]
+    story = []
+    if operator_brand and operator_brand.logo_path:
+        logo_path = UPLOAD_DIR / operator_brand.logo_path
+        if logo_path.is_file():
+            story.extend([Image(str(logo_path), width=48*mm, height=18*mm), Spacer(1, 4*mm)])
+    story.extend([
+        Paragraph(competition.name, styles["Title"]),
+        Paragraph(f"Periodo {competition.start_date.strftime('%d/%m/%Y')} - {competition.end_date.strftime('%d/%m/%Y')} · Dealer {competition.dealer_code or 'non indicato'}", styles["Normal"]),
+        Spacer(1, 5 * mm),
+    ])
     threshold_data = [["Pista", "Validi", "Punti", "Soglia", "Mancanti", "Commissioning"]]
     threshold_data += [[item["label"], item["valid_events"], item["points"], item["reached"], item["remaining"], f"€ {item['commission']:.2f}"] for item in report["tracks"]]
     threshold_data.append(["TOTALE", report["valid_events"], "", "", "", f"€ {report['commissioning_total']:.2f}"])

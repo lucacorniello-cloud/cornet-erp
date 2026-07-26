@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from "react";
+import React, {createContext, useContext, useEffect, useMemo, useState} from "react";
 import ReactDOM from "react-dom/client";
 import {
   AlertTriangle, BarChart3, Boxes, BriefcaseBusiness, CheckCircle2, ChevronDown, ChevronRight, Download,
@@ -27,6 +27,11 @@ type ImportPreview={
     asset_number:string;plan:string;status:string;monthly_fee:string;campaigns:Record<string,string>;
   }>;
 };
+type OperatorBrand={
+  id:string; operator:string; display_name:string; logo_url:string|null; is_active:boolean; updated_at:string;
+};
+
+const OperatorBrandContext=createContext<Record<string,OperatorBrand>>({});
 
 function App(){
   const [logged,setLogged]=useState(!!localStorage.getItem("token"));
@@ -56,10 +61,18 @@ function Login({done}:{done:(t:string)=>void}){
 function Workspace({logout}:{logout:()=>void}){
   const [page,setPage]=useState<Page>("dashboard");
   const [store,setStore]=useState<any>(null);
+  const [operatorBrands,setOperatorBrands]=useState<Record<string,OperatorBrand>>({});
   const [inventoryFilter,setInventoryFilter]=useState<any>({});
   useEffect(()=>{fetch(API+"/settings/store").then(r=>r.json()).then(setStore)},[]);
+  useEffect(()=>{
+    fetch(API+"/settings/operator-brands")
+      .then(r=>r.json())
+      .then((items:OperatorBrand[])=>setOperatorBrands(Object.fromEntries(items.map(item=>[item.operator,item]))))
+      .catch(()=>setOperatorBrands({}));
+  },[]);
   function openInventory(filter:any={}){setInventoryFilter(filter);setPage("inventory")}
-  return <div className="shell">
+  return <OperatorBrandContext.Provider value={operatorBrands}>
+  <div className="shell">
     <aside>
       <div className="brand">{store?.logo_url?<img className="storelogo" src={assetUrl(store.logo_url)} alt="Logo punto vendita"/>:<div className="logo small">C</div>}<div><b>{store?.store_name||"Cornet ERP"}</b><small>Business Suite</small></div></div>
       <nav>
@@ -105,9 +118,10 @@ function Workspace({logout}:{logout:()=>void}){
       {page==="simreport"&&<SimReport openInventory={openInventory}/>}
       {page==="ddt"&&<DdtShipments/>}
       {page==="letterhead"&&<LetterheadDesigner/>}
-      {page==="settings"&&<StoreConfiguration value={store} saved={setStore}/>}
+      {page==="settings"&&<StoreConfiguration value={store} saved={setStore} operatorBrands={operatorBrands} setOperatorBrands={setOperatorBrands}/>}
     </section>
-  </div>;
+  </div>
+  </OperatorBrandContext.Provider>;
 }
 
 function Nav({active,icon,onClick,children}:{active:boolean;icon:React.ReactNode;onClick:()=>void;children:React.ReactNode}){
@@ -115,8 +129,10 @@ function Nav({active,icon,onClick,children}:{active:boolean;icon:React.ReactNode
 }
 
 function OperatorLogo({operator="WINDTRE",compact=false}:{operator?:string;compact?:boolean}){
+  const brands=useContext(OperatorBrandContext);
   const raw=(operator||"ALTRO").trim();
   const key=raw.toUpperCase().replace(/[^A-Z0-9]/g,"");
+  const upperRaw=raw.toUpperCase();
   const aliases:Record<string,{label:string,short:string}>={
     WINDTRE:{label:"WINDTRE",short:"W3"},W3:{label:"WINDTRE",short:"W3"},
     VERY:{label:"very mobile",short:"very"},VERYMOBILE:{label:"very mobile",short:"very"},
@@ -124,9 +140,13 @@ function OperatorLogo({operator="WINDTRE",compact=false}:{operator?:string;compa
     FASTWEB:{label:"FASTWEB",short:"FW"},ILIAD:{label:"iliad",short:"iliad"},
     EOLO:{label:"EOLO",short:"EOLO"},SKYWIFI:{label:"Sky Wifi",short:"Sky"},
   };
-  const brand=aliases[key]||{label:raw.toUpperCase(),short:raw.slice(0,4).toUpperCase()};
+  const brandConfig=brands[key]||brands[upperRaw]||null;
+  const brand=aliases[key]||{label:brandConfig?.display_name||raw.toUpperCase(),short:raw.slice(0,4).toUpperCase()};
   return <span className={`operatorLogo operator-${key.toLowerCase()} ${compact?"compact":""}`} title={`Operatore ${brand.label}`} aria-label={`Operatore ${brand.label}`}>
-    <span className="operatorMark">{brand.short}</span>{!compact&&<span className="operatorName">{brand.label}</span>}
+    {brandConfig?.logo_url
+      ? <img className="operatorBrandImage" src={assetUrl(brandConfig.logo_url)} alt={brand.label}/>
+      : <span className="operatorMark">{brand.short}</span>}
+    {!compact&&<span className="operatorName">{brand.label}</span>}
   </span>;
 }
 
@@ -1046,7 +1066,7 @@ const STORE_FIELDS=[
   ["website","Sito internet","https://"],
 ] as const;
 
-function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
+function StoreConfiguration({value,saved,operatorBrands,setOperatorBrands}:{value:any;saved:(value:any)=>void;operatorBrands:Record<string,OperatorBrand>;setOperatorBrands:(value:Record<string,OperatorBrand>)=>void}){
   const [form,setForm]=useState<any>(value||{store_name:"Cornet Solutions"});
   const [message,setMessage]=useState<{kind:"ok"|"error";text:string}|null>(null);
   const [busy,setBusy]=useState(false);
@@ -1068,12 +1088,43 @@ function StoreConfiguration({value,saved}:{value:any;saved:(value:any)=>void}){
       setForm(result);saved(result);setMessage({kind:"ok",text:partner?"Logo partner aggiornato correttamente.":"Logo aggiornato correttamente."});
     }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
   }
+  async function uploadOperatorLogo(operator:string,file:File|null){
+    if(!file)return;
+    setBusy(true);setMessage(null);
+    const data=new FormData();data.append("file",file);
+    try{
+      const response=await fetch(API+`/settings/operator-brands/${encodeURIComponent(operator)}/logo`,{method:"POST",body:data});
+      const result=await response.json();if(!response.ok)throw new Error(result.detail||"Logo operatore non caricato");
+      const next={...operatorBrands,[result.operator]:result};
+      setOperatorBrands(next);
+      setMessage({kind:"ok",text:`Logo ${result.display_name} aggiornato correttamente.`});
+    }catch(error:any){setMessage({kind:"error",text:error.message})}finally{setBusy(false)}
+  }
   return <main className="page">
     <div className="title"><div><small>IMPOSTAZIONI AZIENDALI</small><h1>Configurazione punto vendita</h1><p>Questi dati saranno utilizzati per documenti, preventivi, DDT e comunicazioni.</p></div></div>
     <div className="settingsgrid">
-      <div className="logoStack"><article className="logocard"><div className="logopreview">{form.logo_url?<img src={assetUrl(form.logo_url)} alt="Logo punto vendita"/>:<Store/>}</div><h2>Logo del mittente</h2><p>Appare a sinistra nei DDT.</p><label className="secondary uploadbutton">Scegli logo<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null)}/></label></article><article className="logocard"><div className="logopreview">{form.partner_logo_url?<img src={assetUrl(form.partner_logo_url)} alt="Logo partner"/>:<BriefcaseBusiness/>}</div><h2>Logo partner</h2><p>WindTre o altro brand, a destra nei DDT.</p><label className="secondary uploadbutton">Scegli logo partner<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null,true)}/></label></article></div>
+      <div className="logoStack">
+        <article className="logocard"><div className="logopreview">{form.logo_url?<img src={assetUrl(form.logo_url)} alt="Logo punto vendita"/>:<Store/>}</div><h2>Logo del mittente</h2><p>Appare a sinistra nei DDT.</p><label className="secondary uploadbutton">Scegli logo<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null)}/></label></article>
+        <article className="logocard"><div className="logopreview">{form.partner_logo_url?<img src={assetUrl(form.partner_logo_url)} alt="Logo partner"/>:<BriefcaseBusiness/>}</div><h2>Logo partner</h2><p>WindTre o altro brand, a destra nei DDT.</p><label className="secondary uploadbutton">Scegli logo partner<input type="file" accept=".png,.jpg,.jpeg,.webp" onChange={event=>uploadLogo(event.target.files?.[0]||null,true)}/></label></article>
+      </div>
       <form className="settingsform" onSubmit={submit}>
         <div className="formsection"><h2>Dati del punto vendita</h2><div className="fieldgrid">{STORE_FIELDS.map(([key,label,placeholder])=><label key={key}>{label}<input value={form[key]||""} placeholder={placeholder} onChange={event=>setForm({...form,[key]:event.target.value})} required={key==="store_name"}/></label>)}</div></div>
+        <div className="formsection">
+          <h2>Loghi operatori per reportistica</h2>
+          <p className="helptext">Scegli il logo che vuoi mostrare nelle dashboard e nei report delle attivazioni.</p>
+          <div className="operatorBrandGrid">
+            {Object.values(operatorBrands).map(brand=><article className="operatorBrandCard" key={brand.operator}>
+              <div className="operatorBrandPreview">
+                {brand.logo_url?<img src={assetUrl(brand.logo_url)} alt={brand.display_name}/>:<OperatorLogo operator={brand.operator} compact/>}
+              </div>
+              <div className="operatorBrandMeta">
+                <b>{brand.display_name}</b>
+                <small>{brand.operator}</small>
+              </div>
+              <label className="secondary uploadbutton">Scegli logo report<input type="file" accept=".png,.jpg,.jpeg,.webp,.svg" onChange={event=>uploadOperatorLogo(brand.operator,event.target.files?.[0]||null)}/></label>
+            </article>)}
+          </div>
+        </div>
         {message&&<div className={"notice "+message.kind}>{message.kind==="ok"?<CheckCircle2/>:<XCircle/>}{message.text}</div>}
         <div className="formactions"><button className="new" disabled={busy}>{busy?"Salvataggio…":"Salva configurazione"}</button></div>
       </form>
